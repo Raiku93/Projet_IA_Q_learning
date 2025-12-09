@@ -4,26 +4,47 @@ import time
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, simpledialog
+from tkinter import ttk, messagebox, filedialog
 import threading
 import json 
 from mpl_toolkits.mplot3d import Axes3D
 
-# --- 1. Paramètres Globaux et Constantes ---
+# --- 1. CONFIGURATION & ESTHÉTIQUE ---
 TAILLE_GRILLE_XY = 10
-# Note : NIVEAUX_ALTITUDE est défini dynamiquement au lancement de l'application
+
+# Palette de couleurs "Aero Science"
+THEME = {
+    "bg_main": "#ECEFF1",    # Gris très clair (fond général)
+    "bg_sidebar": "#263238", # Gris anthracite (panneau de contrôle)
+    "text_sidebar": "#ECEFF1",
+    "accent": "#039BE5",     # Bleu Aviation
+    "accent_hover": "#0288D1",
+    "success": "#43A047",    # Vert Indicateur
+    "warning": "#FB8C00",    # Orange Alerte
+    "danger": "#E53935",     # Rouge Erreur
+    "card": "#FFFFFF"
+}
+
+# Couleurs des éléments physiques
+COLORS = {
+    "obstacle": "#37474F",   # Gris Sombre (Structure)
+    "vent": "#90A4AE",       # Gris Bleu (Flux perturbé)
+    "thermique": "#FF7043",  # Orange (Flux Ascendant)
+    "descendant": "#29B6F6", # Cyan (Flux Descendant)
+    "inertie": "#BA68C8",    # Violet (Cisaillement)
+    "depart": "#66BB6A",     # Vert (Base)
+    "cible": "#FFCA28",      # Jaune/Or (Objectif)
+    "vide": "#FFFFFF",       # Blanc
+    "grid": "#CFD8DC"        # Gris ligne
+}
 
 ACTIONS = {
-    0: 'HAUT_2D',    # (r-1, c, a)
-    1: 'BAS_2D',     # (r+1, c, a)
-    2: 'GAUCHE',     # (r, c-1, a)
-    3: 'DROITE',     # (r, c+1, a)
-    4: 'MONTER',     # (r, c, a+1)
-    5: 'DESCENDRE'   # (r, c, a-1)
+    0: 'HAUT_2D', 1: 'BAS_2D', 2: 'GAUCHE', 3: 'DROITE',
+    4: 'MONTER', 5: 'DESCENDRE'
 }
 NB_ACTIONS = len(ACTIONS)
 
-# --- Récompenses & Physique ---
+# --- Récompenses (Modèle Physique) ---
 RECOMPENSE_CIBLE = 1000
 RECOMPENSE_COLLISION = -50
 RECOMPENSE_MOUVEMENT_2D = -1
@@ -33,24 +54,60 @@ RECOMPENSE_BONUS_FLUX = 5
 RECOMPENSE_MALUS_CONTRE_FLUX = -10 
 PROBABILITE_GLISSEMENT = 0.5    
 
-# --- Couleurs pour l'UI et la 3D ---
-COLORS = {
-    "obstacle": "black",
-    "vent": "lightblue",
-    "thermique": "orange",
-    "descendant": "cyan",
-    "inertie": "yellow",
-    "depart": "red",
-    "cible": "green",
-    "vide": "lightgray"
-}
+# --- 2. Outils UX (Tooltips & Helpers) ---
+class ToolTip(object):
+    """ Gestionnaire de bulles d'aide contextuelles """
+    def __init__(self, widget, text='Info'):
+        self.waittime = 500     #ms
+        self.wraplength = 350   #pixels
+        self.widget = widget
+        self.text = text
+        self.widget.bind("<Enter>", self.enter)
+        self.widget.bind("<Leave>", self.leave)
+        self.widget.bind("<ButtonPress>", self.leave)
+        self.id = None
+        self.tw = None
 
-# --- 2. Classe de Paramètres ---
+    def enter(self, event=None):
+        self.schedule()
+
+    def leave(self, event=None):
+        self.unschedule()
+        self.hidetip()
+
+    def schedule(self):
+        self.unschedule()
+        self.id = self.widget.after(self.waittime, self.showtip)
+
+    def unschedule(self):
+        id = self.id
+        self.id = None
+        if id:
+            self.widget.after_cancel(id)
+
+    def showtip(self, event=None):
+        x, y, cx, cy = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 20
+        self.tw = tk.Toplevel(self.widget)
+        self.tw.wm_overrideredirect(True)
+        self.tw.wm_geometry("+%d+%d" % (x, y))
+        label = tk.Label(self.tw, text=self.text, justify='left',
+                       background="#37474F", foreground="#ECEFF1", relief='solid', borderwidth=0,
+                       wraplength=self.wraplength, font=("Segoe UI", 9), padx=10, pady=6)
+        label.pack()
+
+    def hidetip(self):
+        tw = self.tw
+        self.tw= None
+        if tw:
+            tw.destroy()
+
+# --- 3. Moteur de Simulation (Q-Learning) ---
 class QLearningParameters:
     def __init__(self, taille_etat_base, nb_actions):
         self.TAILLE_ETAT_BASE = taille_etat_base
         self.NB_ACTIONS = nb_actions
-        # Hyperparamètres par défaut
         self.EPISODES = 10000 
         self.ALPHA = 0.1 
         self.GAMMA = 0.9 
@@ -59,35 +116,22 @@ class QLearningParameters:
         self.MIN_EPSILON = 0.01
 
     def calculer_episodes_conseilles(self, coords_obstacles):
-        """Calcule un nombre d'épisodes conseillé selon la complexité."""
         nombre_etats_libres = self.TAILLE_ETAT_BASE - len(coords_obstacles)
         facteur_complexite = 1.5 
         conseil = int(nombre_etats_libres * 20 * facteur_complexite)
-        return max(10000, min(30000, conseil))
+        return max(5000, min(30000, conseil))
 
-# --- 3. Fonctions Logiques de l'Environnement ---
-
-def coords_to_idx(coords, taille_xy, niveaux_altitude):
+def coords_to_idx(coords, taille_xy):
     r, c, a = coords
     taille_couche_xy = taille_xy * taille_xy
     return a * taille_couche_xy + r * taille_xy + c
 
 def initialiser_positions_vide(taille_xy, niveaux_alt):
-    """Initialise une map vide, seulement Départ et Cible."""
-    coords_depart = (taille_xy - 1, 0, 0) # Coin bas gauche, sol
-    coords_cible = (0, taille_xy - 1, niveaux_alt - 1) # Coin haut droite, plafond
-    
-    # Listes vides au démarrage
-    coords_obstacles = []
-    zones_vent = []
-    zones_thermiques = []    
-    zones_descendantes = []  
-    zones_inertie = []       
-    
-    return coords_depart, coords_cible, coords_obstacles, zones_vent, zones_thermiques, zones_descendantes, zones_inertie
+    coords_depart = (taille_xy - 1, 0, 0)
+    coords_cible = (0, taille_xy - 1, niveaux_alt - 1)
+    return coords_depart, coords_cible, [], [], [], [], []
 
 def deplacer_simple(r, c, a, action_index):
-    """Calcule la coordonnée brute après mouvement."""
     nr, nc, na = r, c, a
     if action_index == 0: nr -= 1    
     elif action_index == 1: nr += 1  
@@ -98,7 +142,6 @@ def deplacer_simple(r, c, a, action_index):
     return nr, nc, na
 
 def est_valide(r, c, a, taille_xy, niveaux_alt, obstacles):
-    """Vérifie les limites de la grille et les obstacles."""
     if not (0 <= r < taille_xy and 0 <= c < taille_xy and 0 <= a < niveaux_alt):
         return False
     if (r, c, a) in obstacles:
@@ -108,64 +151,52 @@ def est_valide(r, c, a, taille_xy, niveaux_alt, obstacles):
 def obtenir_etat_recompense_suivants(etat_courant, action_index, coords_cible, coords_obstacles, 
                                      zones_vent, zones_thermiques, zones_descendantes, zones_inertie,
                                      taille_xy, niveaux_alt, mode_stochastique=True):
-    """Cœur du moteur physique et des récompenses."""
     r, c, a = etat_courant
     new_r, new_c, new_a = deplacer_simple(r, c, a, action_index)
     
-    # Collision Mur ou Obstacle immédiat
     if not est_valide(new_r, new_c, new_a, taille_xy, niveaux_alt, coords_obstacles):
         return etat_courant, RECOMPENSE_COLLISION, True 
 
     recompense_mouvement = 0
     etat_intermediaire = (new_r, new_c, new_a)
 
-    # Coût de base du mouvement
     if action_index in [0, 1, 2, 3]: recompense_mouvement = RECOMPENSE_MOUVEMENT_2D
     elif action_index in [4, 5]: recompense_mouvement = RECOMPENSE_MOUVEMENT_3D
 
-    # 1. Vent (Pénalité de zone)
-    if etat_intermediaire in zones_vent:
-        recompense_mouvement += RECOMPENSE_PENALITE_VENT
+    # Modélisation des flux
+    if etat_intermediaire in zones_vent: recompense_mouvement += RECOMPENSE_PENALITE_VENT
 
-    # 2. Thermique (Bonus si on monte, Malus si on descend)
     if etat_courant in zones_thermiques:
         if action_index == 4: recompense_mouvement += RECOMPENSE_BONUS_FLUX 
         elif action_index == 5: recompense_mouvement += RECOMPENSE_MALUS_CONTRE_FLUX 
             
-    # 3. Descendant (Bonus si on descend, Malus si on monte)
     if etat_courant in zones_descendantes:
         if action_index == 5: recompense_mouvement += RECOMPENSE_BONUS_FLUX
         elif action_index == 4: recompense_mouvement += RECOMPENSE_MALUS_CONTRE_FLUX
 
     etat_final = etat_intermediaire
     
-    # 4. Inertie (Glissement Stochastique)
+    # Modélisation du cisaillement (Shear)
     if etat_intermediaire in zones_inertie and action_index in [0, 1, 2, 3]:
-        # Si on bouge horizontalement dans une zone d'inertie
         if mode_stochastique and random.random() < PROBABILITE_GLISSEMENT:
-            # On glisse d'une case de plus dans la même direction
+            # Dérive induite
             slide_r, slide_c, slide_a = deplacer_simple(new_r, new_c, new_a, action_index)
-            
-            # Si le glissement tape un mur
             if not est_valide(slide_r, slide_c, slide_a, taille_xy, niveaux_alt, coords_obstacles):
                 return etat_intermediaire, RECOMPENSE_COLLISION, True
             else:
                 etat_final = (slide_r, slide_c, slide_a)
 
-    # Vérification Cible
     if etat_final == coords_cible:
         return etat_final, RECOMPENSE_CIBLE + recompense_mouvement, True
     
     return etat_final, recompense_mouvement, False
 
-# --- 4. Agent Q-Learning ---
 class QLearningAgent:
     def __init__(self, params: QLearningParameters, taille_xy, niveaux_altitude):
         self.params = params
         self.TAILLE_GRILLE_XY = taille_xy
         self.NIVEAUX_ALTITUDE = niveaux_altitude
         
-        # Initialisation avec MAP VIDE
         self.coords_depart, self.coords_cible, self.coords_obstacles, self.zones_vent, \
         self.zones_thermiques, self.zones_descendantes, self.zones_inertie = \
             initialiser_positions_vide(self.TAILLE_GRILLE_XY, self.NIVEAUX_ALTITUDE)
@@ -177,7 +208,7 @@ class QLearningAgent:
         self.meilleure_recompense = -float('inf')
         self.meilleur_chemin = []
         self.EPSILON = self.params.EPSILON_INIT
-        self.MAX_STEPS_EPISODE = 100 # Valeur temporaire
+        self.MAX_STEPS_EPISODE = 100
 
     def reset_for_training(self):
         self.historique_recompenses = []
@@ -185,46 +216,41 @@ class QLearningAgent:
         self.EPSILON = self.params.EPSILON_INIT
         self.meilleure_recompense = -float('inf')
         self.meilleur_chemin = []
-        
-        # Ajustement dynamique de la durée de l'épisode selon la complexité
         etats_libres = self.TAILLE_ETAT - len(self.coords_obstacles)
         self.MAX_STEPS_EPISODE = max(50, int(etats_libres * 2.5))
 
     def train(self, progress_callback=None, live_path_callback=None):
         self.reset_for_training()
         ALPHA, GAMMA, EPISODES = self.params.ALPHA, self.params.GAMMA, self.params.EPISODES
-        path_update_interval = max(1, EPISODES // 200)
+        path_update_interval = max(1, EPISODES // 100)
 
         for episode in range(EPISODES):
             curr = self.coords_depart
             if curr is None: break
             
-            idx_curr = coords_to_idx(curr, self.TAILLE_GRILLE_XY, self.NIVEAUX_ALTITUDE)
+            idx_curr = coords_to_idx(curr, self.TAILLE_GRILLE_XY)
             done = False
             path = [curr]
             ep_reward = 0
             steps = 0
             
             while not done:
-                # Epsilon-Greedy
                 if random.random() < self.EPSILON: action = random.choice(list(ACTIONS.keys()))
                 else:
                     max_q = np.max(self.Q_table[idx_curr, :])
                     actions = np.where(self.Q_table[idx_curr, :] == max_q)[0]
                     action = random.choice(actions) if len(actions) > 0 else random.choice(list(ACTIONS.keys()))
                 
-                # Action dans l'environnement (Stochastique activé)
                 next_s, r, done_env = obtenir_etat_recompense_suivants(
                     curr, action, self.coords_cible, self.coords_obstacles, self.zones_vent, 
                     self.zones_thermiques, self.zones_descendantes, self.zones_inertie,
-                    self.TAILLE_GRILLE_XY, self.NIVEAUX_ALTITUDE, mode_stochastique=True 
+                    self.TAILLE_GRILLE_XY, self.NIVEAUX_ALTITUDE
                 )
                 
-                idx_next = coords_to_idx(next_s, self.TAILLE_GRILLE_XY, self.NIVEAUX_ALTITUDE)
+                idx_next = coords_to_idx(next_s, self.TAILLE_GRILLE_XY)
                 ep_reward += r
                 path.append(next_s)
                 
-                # Mise à jour Q-Table (Bellman)
                 old_q = self.Q_table[idx_curr, action]
                 max_next_q = np.max(self.Q_table[idx_next, :]) if not done_env else 0
                 self.Q_table[idx_curr, action] = (1 - ALPHA) * old_q + ALPHA * (r + GAMMA * max_next_q)
@@ -233,22 +259,18 @@ class QLearningAgent:
                 idx_curr = idx_next
                 steps += 1
                 
-                # Fin épisode (Cible ou Timeout)
                 if steps > self.MAX_STEPS_EPISODE:
                     done = True
                     if curr != self.coords_cible: ep_reward += RECOMPENSE_COLLISION 
                 else: done = done_env
             
-            # Décroissance Epsilon
             if self.EPSILON > self.params.MIN_EPSILON: self.EPSILON *= self.params.DECAY_EPSILON
             self.historique_recompenses.append(ep_reward)
             
-            # Sauvegarde meilleur
             if ep_reward > self.meilleure_recompense and curr == self.coords_cible:
                 self.meilleure_recompense = ep_reward
                 self.meilleur_chemin = list(path)
             
-            # Callbacks UI
             if progress_callback and episode % 50 == 0: progress_callback(episode, self.meilleure_recompense)
             if live_path_callback and (episode + 1) % path_update_interval == 0: live_path_callback(path)
                 
@@ -256,7 +278,6 @@ class QLearningAgent:
 
 def obtenir_chemin_optimal(Q_table, coords_depart, coords_cible, coords_obstacles, zones_vent, 
                            zones_thermiques, zones_descendantes, zones_inertie, taille_xy, niveaux_alt):
-    """Joue le chemin optimal (Greedy) sans aléatoire."""
     if coords_depart is None or coords_cible is None: return []
     etats_libres = (taille_xy * taille_xy * niveaux_alt) - len(coords_obstacles)
     max_steps = int(etats_libres * 1.5) 
@@ -265,13 +286,12 @@ def obtenir_chemin_optimal(Q_table, coords_depart, coords_cible, coords_obstacle
     steps = 0
     
     while curr != coords_cible and steps < max_steps:
-        idx = coords_to_idx(curr, taille_xy, niveaux_alt)
+        idx = coords_to_idx(curr, taille_xy)
         max_q = np.max(Q_table[idx, :])
         actions = np.where(Q_table[idx, :] == max_q)[0]
         if len(actions) == 0: break 
         action = random.choice(actions)
         
-        # Mode Stochastique désactivé pour le replay
         next_s, _, done = obtenir_etat_recompense_suivants(
             curr, action, coords_cible, coords_obstacles, zones_vent, 
             zones_thermiques, zones_descendantes, zones_inertie,
@@ -283,281 +303,287 @@ def obtenir_chemin_optimal(Q_table, coords_depart, coords_cible, coords_obstacle
         steps += 1
     return path
 
-# --- 5. Interface Graphique (GUI) ---
+# --- 4. Interface Graphique (GUI Enterprise) ---
 class QLearningGUI:
     def __init__(self, master, agent, params):
         self.master = master
         self.agent = agent
         self.params = params
-        master.title(f"Q-Learning Drone 3D | {TAILLE_GRILLE_XY}x{TAILLE_GRILLE_XY}x{self.agent.NIVEAUX_ALTITUDE}")
         
-        self.CELL_SIZE = 40 
+        master.title("NavDrone AI [Enterprise Edition] - Environnement de Simulation Avancé")
+        master.geometry("1280x850")
+        master.configure(bg=THEME["bg_main"])
+        
+        # Style Configuration
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        
+        # Styles Généraux
+        self.style.configure("TFrame", background=THEME["bg_main"])
+        self.style.configure("TLabel", background=THEME["bg_main"], foreground="#37474F", font=("Segoe UI", 10))
+        self.style.configure("Header.TLabel", font=("Segoe UI", 16, "bold"), foreground=THEME["bg_sidebar"])
+        self.style.configure("Card.TFrame", background=THEME["card"], relief="raised", borderwidth=1)
+        
+        # Style Sidebar (Sombre - Cockpit)
+        self.style.configure("Sidebar.TFrame", background=THEME["bg_sidebar"])
+        self.style.configure("Sidebar.TLabel", background=THEME["bg_sidebar"], foreground=THEME["text_sidebar"], font=("Segoe UI", 9))
+        self.style.configure("SidebarTitle.TLabel", background=THEME["bg_sidebar"], foreground=THEME["accent"], font=("Segoe UI", 11, "bold"))
+        self.style.configure("Sidebar.TLabelframe", background=THEME["bg_sidebar"], foreground=THEME["text_sidebar"])
+        self.style.configure("Sidebar.TLabelframe.Label", background=THEME["bg_sidebar"], foreground=THEME["accent"], font=("Segoe UI", 10, "bold"))
+        
+        # Boutons
+        self.style.configure("Action.TButton", font=("Segoe UI", 10, "bold"), background=THEME["accent"], foreground="white", padding=10)
+        self.style.map("Action.TButton", background=[('active', THEME["accent_hover"])])
+        
+        self.style.configure("Success.TButton", font=("Segoe UI", 11, "bold"), background=THEME["success"], foreground="white", padding=10)
+        self.style.map("Success.TButton", background=[('active', '#2E7D32')])
+
+        self.style.configure("TNotebook", background=THEME["bg_main"], tabposition='n')
+        self.style.configure("TNotebook.Tab", padding=[20, 8], font=("Segoe UI", 11, "bold"), background="#CFD8DC")
+        self.style.map("TNotebook.Tab", background=[("selected", "white")], foreground=[("selected", THEME["accent"])])
+
+        # Variables d'état
+        self.CELL_SIZE = 55 
         self.canvas_width = self.CELL_SIZE * self.agent.TAILLE_GRILLE_XY
         self.canvas_height = self.CELL_SIZE * self.agent.TAILLE_GRILLE_XY
-        
         self.current_path = []
         self.current_step = 0
         self.replay_running = False
         self.training_in_progress = False
-        self.training_finished = False
         self.current_altitude_level = tk.IntVar(value=0)
+        self.edit_mode = tk.StringVar(value="obstacle")
         
-        # --- Mise en page Notebook (Onglets) ---
-        self.notebook = ttk.Notebook(master)
-        self.notebook.pack(pady=10, padx=10, fill="both", expand=True)
+        self.setup_ui()
+        
+    def setup_ui(self):
+        # Header
+        header = ttk.Frame(self.master, padding=15)
+        header.pack(fill='x')
+        
+        lbl_title = ttk.Label(header, text="🚁 NavDrone AI Control Center", style="Header.TLabel")
+        lbl_title.pack(side=tk.LEFT, padx=10)
+        
+        btn_help = ttk.Button(header, text="Documentation Technique", command=self.show_help)
+        btn_help.pack(side=tk.RIGHT)
+        ToolTip(btn_help, "Consulter les spécifications techniques et le manuel d'opération.")
 
-        self.frame_grid = ttk.Frame(self.notebook)
-        self.notebook.add(self.frame_grid, text="Éditeur & Replay")
-        self.setup_grid_frame(self.frame_grid)
+        # Contenu principal
+        self.notebook = ttk.Notebook(self.master)
+        self.notebook.pack(pady=5, padx=10, fill="both", expand=True)
 
-        self.frame_chart = ttk.Frame(self.notebook)
-        self.notebook.add(self.frame_chart, text="Apprentissage")
-        self.setup_chart_frame(self.frame_chart)
+        self.frame_editor = ttk.Frame(self.notebook)
+        self.notebook.add(self.frame_editor, text="   DESIGN & SIMULATION   ")
+        self.setup_editor_tab(self.frame_editor)
+
+        self.frame_3d = ttk.Frame(self.notebook)
+        self.notebook.add(self.frame_3d, text="   VISUALISATION 3D   ")
+        self.setup_3d_frame(self.frame_3d)
 
         self.frame_stats = ttk.Frame(self.notebook)
-        self.notebook.add(self.frame_stats, text="Stats")
-        self.setup_stats_frame(self.frame_stats)
-        
-        self.frame_3d = ttk.Frame(self.notebook)
-        self.notebook.add(self.frame_3d, text="Visualisation 3D")
-        self.setup_3d_frame(self.frame_3d)
+        self.notebook.add(self.frame_stats, text="   TÉLÉMETRIE   ")
+        self.setup_stats_tab(self.frame_stats)
         
         self.frame_params = ttk.Frame(self.notebook)
-        self.notebook.add(self.frame_params, text="Paramètres")
-        self.setup_params_frame(self.frame_params)
-        
-        self.canvas_grid.bind("<Button-1>", self.on_grid_click)
+        self.notebook.add(self.frame_params, text="   PARAMÈTRES SYSTÈME   ")
+        self.setup_params_tab(self.frame_params)
+
         self.draw_grid()
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
 
-    # --- Onglet Paramètres ---
-    def setup_params_frame(self, frame):
-        # Variables existantes
+    # --- TAB 1: ÉDITEUR (UX Pro) ---
+    def setup_editor_tab(self, parent):
+        # 1. ZONE CARTE (Gauche)
+        frame_map_container = ttk.Frame(parent, padding=15)
+        frame_map_container.pack(side=tk.LEFT, fill="both", expand=True)
+        
+        map_header = ttk.Frame(frame_map_container)
+        map_header.pack(fill='x', pady=(0,10))
+        self.lbl_etage = ttk.Label(map_header, text="ALTITUDE (AGL) : 0", font=("Segoe UI", 14, "bold"), foreground=THEME["accent"])
+        self.lbl_etage.pack(side=tk.LEFT)
+        
+        canvas_frame = tk.Frame(frame_map_container, bg="gray", bd=1) 
+        canvas_frame.pack(anchor="center")
+        
+        self.canvas_grid = tk.Canvas(canvas_frame, width=self.canvas_width, height=self.canvas_height, 
+                                     bg="white", highlightthickness=0)
+        self.canvas_grid.pack()
+        self.canvas_grid.bind("<Button-1>", self.on_grid_click)
+        ToolTip(self.canvas_grid, "Zone Tactique.\nClic gauche pour placer les entités sélectionnées.\nLes éléments dépendent de l'altitude Z actuelle.")
+
+        # 2. ZONE COMMANDES (Droite)
+        sidebar = ttk.Frame(parent, width=350, style="Sidebar.TFrame")
+        sidebar.pack(side=tk.RIGHT, fill="y", padx=0, pady=0, ipadx=10)
+        
+        ttk.Label(sidebar, text="CONTRÔLE DE MISSION", style="SidebarTitle.TLabel", padding=15).pack(fill='x')
+
+        # Altitude
+        lf_alt = ttk.LabelFrame(sidebar, text="LAYER CONTROL (ALTITUDE)", padding=10, style="Sidebar.TLabelframe")
+        lf_alt.pack(fill='x', pady=5, padx=10)
+        
+        self.scale_alt = tk.Scale(lf_alt, from_=0, to=self.agent.NIVEAUX_ALTITUDE-1, orient=tk.HORIZONTAL, 
+                                   variable=self.current_altitude_level, command=self.on_altitude_change,
+                                   bg=THEME["bg_sidebar"], fg="white", highlightthickness=0, troughcolor="#37474F", activebackground=THEME["accent"])
+        self.scale_alt.pack(fill='x', pady=5)
+        ttk.Label(lf_alt, text="Sélecteur de Couche Z", style="Sidebar.TLabel", font=("Segoe UI", 8)).pack(anchor='e')
+
+        # Outils
+        lf_tools = ttk.LabelFrame(sidebar, text="OUTILS ENVIRONNEMENT", padding=10, style="Sidebar.TLabelframe")
+        lf_tools.pack(fill='x', pady=10, padx=10)
+        
+        # Icônes vectorielles propres et claires
+        tools = [
+            ("Départ Drone", "depart", COLORS["depart"], "🛫"),   
+            ("Cible", "cible", COLORS["cible"], "🎯"),
+            ("Structure", "obstacle", COLORS["obstacle"], "⬛"),
+            ("Effacer", "effacer", "#B0BEC5", "🧹"),
+            
+            # Phénomènes Aérologiques
+            ("Turbulences", "vent", COLORS["vent"], "〰"),         # Vague pour l'air
+            ("Ascendance", "thermique", COLORS["thermique"], "⇧"), # Flèche haut
+            ("Rabattant", "descendant", COLORS["descendant"], "⇩"),# Flèche bas
+            ("Cisaillement", "inertie", COLORS["inertie"], "⚡")   # Éclair
+        ]
+        
+        frame_palette = tk.Frame(lf_tools, bg=THEME["bg_sidebar"])
+        frame_palette.pack(fill='x')
+        
+        for i, (name, mode, col, icon) in enumerate(tools):
+            row = i // 2
+            col_idx = i % 2
+            btn_container = tk.Frame(frame_palette, bg=THEME["bg_sidebar"], pady=3, padx=3)
+            btn_container.grid(row=row, column=col_idx, sticky="ew")
+            
+            rb = tk.Radiobutton(btn_container, text=f"{icon} {name}", variable=self.edit_mode, value=mode,
+                                indicatoron=0, width=16, 
+                                bg="#37474F", fg="white", selectcolor=THEME["accent"], 
+                                activebackground=THEME["accent_hover"], activeforeground="white",
+                                font=("Segoe UI", 9), relief="flat", bd=0, pady=8)
+            rb.pack(fill="both")
+            
+            # Descriptions techniques
+            desc = {
+                "depart": "Point d'insertion initial [État S0].\nLe drone démarre ici.",
+                "cible": "Objectif de mission [État Terminal].\nRécompense maximale (+1000).",
+                "obstacle": "Zone d'exclusion statique (NFZ).\nCollision entraîne un échec immédiat.",
+                "vent": "Zone de turbulence atmosphérique.\nAugmente le coût de traversée (Pénalité énergétique).",
+                "thermique": "Courant ascendant thermique.\nFavorise le mouvement vertical positif (Gain Z).",
+                "descendant": "Flux d'air rabattant.\nForce vectorielle verticale négative (Perte Z).",
+                "inertie": "Zone de cisaillement (Wind Shear).\nInduit une dérive stochastique imprévisible.",
+                "effacer": "Suppression des entités sur la coordonnée active."
+            }
+            ToolTip(rb, desc.get(mode, ""))
+        
+        frame_palette.columnconfigure(0, weight=1)
+        frame_palette.columnconfigure(1, weight=1)
+
+        # Opérations
+        lf_ops = ttk.Frame(sidebar, style="Sidebar.TFrame")
+        lf_ops.pack(fill='x', pady=20, padx=10)
+        
+        self.btn_train = ttk.Button(lf_ops, text="▶  INITIALISER SIMULATION", style="Success.TButton", command=self.start_training_manually)
+        self.btn_train.pack(fill='x', pady=5)
+        
+        self.progress = ttk.Progressbar(lf_ops, length=100, mode='determinate')
+        self.progress.pack(fill='x', pady=2)
+        
+        self.lbl_status = ttk.Label(lf_ops, text="Système Prêt.", style="Sidebar.TLabel", font=("Segoe UI", 9, "italic"))
+        self.lbl_status.pack(anchor='w', pady=(2, 10))
+
+        self.btn_replay = ttk.Button(lf_ops, text="↺  VISUALISER TRAJECTOIRE", style="Action.TButton", command=self.start_replay, state=tk.DISABLED)
+        self.btn_replay.pack(fill='x', pady=5)
+
+        # Data
+        frame_data = tk.Frame(sidebar, bg=THEME["bg_sidebar"])
+        frame_data.pack(side=tk.BOTTOM, fill='x', padx=10, pady=10)
+        
+        btn_save = tk.Button(frame_data, text="💾 Export JSON", bg="#546E7A", fg="white", relief="flat", command=self.export_map)
+        btn_save.pack(side=tk.LEFT, fill='x', expand=True, padx=(0,2))
+        
+        btn_load = tk.Button(frame_data, text="📂 Import JSON", bg="#546E7A", fg="white", relief="flat", command=self.import_map)
+        btn_load.pack(side=tk.RIGHT, fill='x', expand=True, padx=(2,0))
+
+    # --- TAB 2: 3D ---
+    def setup_3d_frame(self, frame):
+        plot_container = ttk.Frame(frame, style="Card.TFrame", padding=15)
+        plot_container.pack(fill='both', expand=True, padx=20, pady=20)
+        
+        self.fig_3d = plt.figure(figsize=(5, 4), facecolor='white')
+        self.ax_3d = self.fig_3d.add_subplot(111, projection='3d')
+        self.canvas_3d = FigureCanvasTkAgg(self.fig_3d, master=plot_container)
+        self.canvas_3d.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        lbl = ttk.Label(plot_container, text="Modèle 3D - Rotation via clic gauche + glisser", background="white", foreground="gray")
+        lbl.pack(pady=5)
+        self.draw_3d_environment([])
+
+    # --- TAB 3: STATS ---
+    def setup_stats_tab(self, frame):
+        paned = ttk.PanedWindow(frame, orient=tk.HORIZONTAL)
+        paned.pack(fill='both', expand=True, padx=20, pady=20)
+        
+        f1 = ttk.Frame(paned, style="Card.TFrame", padding=15)
+        paned.add(f1, weight=1)
+        ttk.Label(f1, text="Analyse de Convergence (Reward/Episode)", style="Header.TLabel", background="white").pack(anchor='w', pady=(0,10))
+        
+        self.fig_conv, self.ax_conv = plt.subplots(figsize=(4,3), facecolor='white')
+        self.canvas_chart = FigureCanvasTkAgg(self.fig_conv, master=f1)
+        self.canvas_chart.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        f2 = ttk.Frame(paned, style="Card.TFrame", padding=15)
+        paned.add(f2, weight=1)
+        ttk.Label(f2, text="Profil de Vol (Altitude & Score Cumulé)", style="Header.TLabel", background="white").pack(anchor='w', pady=(0,10))
+        
+        self.fig_stats, (self.ax_alt, self.ax_reward) = plt.subplots(2, 1, figsize=(4, 4), sharex=True, facecolor='white')
+        self.canvas_stats = FigureCanvasTkAgg(self.fig_stats, master=f2)
+        self.canvas_stats.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+    # --- TAB 4: PARAMÈTRES ---
+    def setup_params_tab(self, frame):
+        container = ttk.Frame(frame, style="Card.TFrame", padding=30)
+        container.pack(fill='both', expand=True, padx=100, pady=30)
+        
+        ttk.Label(container, text="Configuration du Solveur Q-Learning", style="Header.TLabel", background="white").pack(anchor='w', pady=(0, 20))
+        
+        grid_f = ttk.Frame(container, style="Card.TFrame")
+        grid_f.pack(fill='x')
+        
+        def create_param_row(parent, row, label_text, var, tooltip_text, is_int=False):
+            ttk.Label(parent, text=label_text, background="white", font=("Segoe UI", 11, "bold")).grid(row=row, column=0, sticky='w', pady=12, padx=10)
+            entry = ttk.Entry(parent, textvariable=var, width=12, font=("Segoe UI", 11))
+            entry.grid(row=row, column=1, sticky='w', pady=12)
+            ToolTip(entry, tooltip_text)
+            unit = "(int)" if is_int else "(float)"
+            ttk.Label(parent, text=unit, background="white", foreground="gray").grid(row=row, column=2, sticky='w', padx=5)
+
         self.var_episodes = tk.IntVar(value=self.params.EPISODES)
         self.var_alpha = tk.DoubleVar(value=self.params.ALPHA)
         self.var_gamma = tk.DoubleVar(value=self.params.GAMMA)
-        self.var_epsilon_init = tk.DoubleVar(value=self.params.EPSILON_INIT)
-        
-        # NOUVELLE VARIABLE : Altitude
-        self.var_altitude = tk.IntVar(value=self.agent.NIVEAUX_ALTITUDE)
-        
-        main_frame = ttk.Frame(frame, padding="15")
-        main_frame.pack(fill='both', expand=True)
-        
-        ttk.Label(main_frame, text="Paramètres Environnement", font=('Arial', 12, 'bold')).pack(pady=(0, 10))
-        
-        # Champ Altitude
-        row_alt = ttk.Frame(main_frame); row_alt.pack(fill='x', pady=5)
-        ttk.Label(row_alt, text="Altitude Z (1 à 10):", width=20).pack(side=tk.LEFT)
-        ttk.Entry(row_alt, textvariable=self.var_altitude, width=10).pack(side=tk.LEFT)
-        ttk.Label(row_alt, text="(Affecte les éléments sur la map)", foreground="red", font=("Arial", 8)).pack(side=tk.LEFT, padx=5)
+        self.var_epsilon = tk.DoubleVar(value=self.params.EPSILON_INIT)
+        self.var_altitude_max = tk.IntVar(value=self.agent.NIVEAUX_ALTITUDE)
 
-        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=15)
-        ttk.Label(main_frame, text="Hyperparamètres de l'Agent", font=('Arial', 12, 'bold')).pack(pady=(0, 10))
+        create_param_row(grid_f, 0, "Itérations (Épisodes) :", self.var_episodes, "Nombre total de cycles d'entraînement pour la convergence.", True)
+        create_param_row(grid_f, 1, "Taux d'Apprentissage (α) :", self.var_alpha, "Poids donné aux nouvelles informations vs connaissances acquises.")
+        create_param_row(grid_f, 2, "Facteur d'Actualisation (γ) :", self.var_gamma, "Importance des récompenses futures (0=Myope, 1=Visionnaire).")
+        create_param_row(grid_f, 3, "Exploration Initiale (ε) :", self.var_epsilon, "Probabilité de choix d'action aléatoire au démarrage.")
         
-        # Champs IA existants
-        for txt, var in [("Episodes:", self.var_episodes), ("Alpha:", self.var_alpha), ("Gamma:", self.var_gamma), ("Epsilon Init:", self.var_epsilon_init)]:
-            row = ttk.Frame(main_frame); row.pack(fill='x', pady=5)
-            ttk.Label(row, text=txt, width=20).pack(side=tk.LEFT)
-            ttk.Entry(row, textvariable=var, width=10).pack(side=tk.LEFT)
-            
-        ttk.Button(main_frame, text="Appliquer Tout", command=self.apply_params).pack(pady=20)
-        self.lbl_advice = ttk.Label(main_frame, text="", foreground="blue"); self.lbl_advice.pack()
+        ttk.Separator(grid_f, orient='horizontal').grid(row=4, column=0, columnspan=3, sticky='ew', pady=20)
+        
+        create_param_row(grid_f, 5, "Plafond de Vol (Couches Z) :", self.var_altitude_max, "Hauteur maximale de l'espace aérien discrétisé.", True)
+
+        btn_apply = ttk.Button(container, text="Appliquer Configuration", style="Action.TButton", command=self.apply_params)
+        btn_apply.pack(pady=30)
+        
+        self.lbl_advice = ttk.Label(container, text="", foreground=THEME["accent"], background="white", font=("Segoe UI", 10, "italic"))
+        self.lbl_advice.pack()
         self.update_advice()
 
-    def apply_params(self):
-        if self.training_in_progress: 
-            messagebox.showwarning("Stop", "Impossible de modifier les paramètres pendant l'entraînement.")
-            return
-
-        # 1. Mise à jour des Hyperparamètres IA
-        self.params.EPISODES = self.var_episodes.get()
-        self.params.ALPHA = self.var_alpha.get()
-        self.params.GAMMA = self.var_gamma.get()
-        self.params.EPSILON_INIT = self.var_epsilon_init.get()
-        self.progress_bar['maximum'] = self.params.EPISODES
-
-        # 2. Gestion du changement d'Altitude
-        new_alt = self.var_altitude.get()
-        if new_alt < 1: new_alt = 1 # Sécurité
-        if new_alt > 10: new_alt = 10 # Sécurité
-        
-        if new_alt != self.agent.NIVEAUX_ALTITUDE:
-            # Mise à jour de l'agent
-            self.agent.NIVEAUX_ALTITUDE = new_alt
-            self.agent.TAILLE_ETAT = self.agent.TAILLE_GRILLE_XY * self.agent.TAILLE_GRILLE_XY * new_alt
-            self.params.TAILLE_ETAT_BASE = self.agent.TAILLE_ETAT # Mise à jour param size
-            
-            # Reset complet de la mémoire de l'agent
-            self.agent.reset_for_training()
-            
-            # Nettoyage de la map : on supprime les blocs qui sont désormais "hors limites" (trop haut)
-            features = [self.agent.coords_obstacles, self.agent.zones_vent, self.agent.zones_thermiques, 
-                        self.agent.zones_descendantes, self.agent.zones_inertie]
-            for feature_list in features:
-                # On garde seulement les éléments dont z < new_alt
-                feature_list[:] = [coord for coord in feature_list if coord[2] < new_alt]
-            
-            # Reset Départ/Cible si hors limites
-            if self.agent.coords_depart and self.agent.coords_depart[2] >= new_alt:
-                self.agent.coords_depart = (self.agent.TAILLE_GRILLE_XY-1, 0, 0) # Reset sol
-            if self.agent.coords_cible and self.agent.coords_cible[2] >= new_alt:
-                self.agent.coords_cible = (0, self.agent.TAILLE_GRILLE_XY-1, new_alt-1) # Reset plafond
-            
-            # Mise à jour de l'UI
-            self.current_altitude_level.set(0)
-            self.scale_altitude.config(to=new_alt-1) # Mise à jour du slider
-            self.draw_grid()
-            self.draw_3d_environment()
-            
-            messagebox.showinfo("Mise à jour", f"Paramètres appliqués.\nL'environnement a été redimensionné à {new_alt} niveaux.")
-        else:
-            messagebox.showinfo("Succès", "Paramètres IA mis à jour.")
-            
-        self.update_advice()
-
-
-    def update_advice(self):
-        c = self.params.calculer_episodes_conseilles(self.agent.coords_obstacles)
-        self.lbl_advice.config(text=f"Conseil IA : ~{c} épisodes recommandés")
-
-    # --- Onglet Graphiques ---
-    def setup_chart_frame(self, frame):
-        self.fig_conv, self.ax_conv = plt.subplots(figsize=(5,4))
-        self.canvas_chart = FigureCanvasTkAgg(self.fig_conv, master=frame)
-        self.canvas_chart.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-    def setup_stats_frame(self, frame):
-        self.fig_stats, (self.ax_pos, self.ax_alt, self.ax_reward) = plt.subplots(3, 1, figsize=(5, 6), sharex=True)
-        self.canvas_stats = FigureCanvasTkAgg(self.fig_stats, master=frame)
-        self.canvas_stats.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-
-    # --- ÉDITEUR & GRILLE (UX Améliorée) ---
-    def setup_grid_frame(self, frame):
-        self.canvas_grid = tk.Canvas(frame, width=self.canvas_width, height=self.canvas_height, bg="white")
-        self.canvas_grid.pack(side=tk.LEFT, padx=10, pady=10)
-
-        ctrl = ttk.Frame(frame); ctrl.pack(side=tk.RIGHT, padx=10, pady=10, fill="y")
-        
-        # 1. Slider Altitude (MODIFIÉ)
-        lf_visu = ttk.LabelFrame(ctrl, text="Altitude de vue (Couche)", padding=5)
-        lf_visu.pack(fill='x', pady=5)
-        
-        # On stocke le widget dans self.scale_altitude pour pouvoir le mettre à jour
-        self.scale_altitude = tk.Scale(lf_visu, from_=0, to=self.agent.NIVEAUX_ALTITUDE-1, orient=tk.HORIZONTAL, 
-                 variable=self.current_altitude_level, command=self.on_altitude_change)
-        self.scale_altitude.pack(fill='x')
-
-
-        # 2. Palette d'Outils avec Légende Couleur
-        lf_tools = ttk.LabelFrame(ctrl, text="Palette d'Outils", padding=5)
-        lf_tools.pack(fill='x', pady=5)
-        
-        self.edit_mode = tk.StringVar(value="obstacle")
-        
-        # Helper pour créer une ligne de palette propre
-        def add_tool(parent, text, mode, color):
-            row = ttk.Frame(parent)
-            row.pack(fill='x', pady=2, anchor='w')
-            # Carré de couleur
-            cv = tk.Canvas(row, width=15, height=15, bg=color, highlightthickness=1, highlightbackground="gray")
-            cv.pack(side=tk.LEFT, padx=(0,5))
-            # Radiobutton
-            ttk.Radiobutton(row, text=text, variable=self.edit_mode, value=mode).pack(side=tk.LEFT)
-
-        ttk.Label(lf_tools, text="Structure:", font=("Arial", 9, "bold")).pack(anchor='w', pady=(5,0))
-        add_tool(lf_tools, "Départ (A)", "depart", COLORS["depart"])
-        add_tool(lf_tools, "Cible (T)", "cible", COLORS["cible"])
-        add_tool(lf_tools, "Obstacle", "obstacle", COLORS["obstacle"])
-        
-        ttk.Label(lf_tools, text="Courant:", font=("Arial", 9, "bold")).pack(anchor='w', pady=(5,0))
-        add_tool(lf_tools, "Ascendant", "thermique", COLORS["thermique"])
-        add_tool(lf_tools, "Descendant", "descendant", COLORS["descendant"])
-        add_tool(lf_tools, "Turbulence", "vent", COLORS["vent"])
-        add_tool(lf_tools, "Glissant", "inertie", COLORS["inertie"])
-        
-        ttk.Separator(lf_tools, orient='horizontal').pack(fill='x', pady=5)
-        ttk.Radiobutton(lf_tools, text="Gomme / Effacer", variable=self.edit_mode, value="effacer").pack(anchor='w')
-
-
-        ttk.Separator(ctrl, orient='horizontal').pack(fill='x', pady=10)
-        btn_frame = ttk.Frame(ctrl)
-        btn_frame.pack(fill='x', pady=2)
-        ttk.Button(btn_frame, text="Exporter Map (JSON)", command=self.export_map).pack(fill='x', pady=2)
-        ttk.Button(btn_frame, text="Importer Map (JSON)", command=self.import_map).pack(fill='x', pady=2)
-        ttk.Separator(ctrl, orient='horizontal').pack(fill='x', pady=10)
-
-
-        # 3. Actions Entraînement
-        self.btn_train = ttk.Button(ctrl, text="Lancer Entraînement", command=self.start_training_manually)
-        self.btn_train.pack(fill='x', pady=10)
-        
-        self.btn_replay = ttk.Button(ctrl, text="Replay Optimal", command=self.start_replay, state=tk.DISABLED)
-        self.btn_replay.pack(fill='x')
-        
-        self.progress_bar = ttk.Progressbar(ctrl, length=200, mode='determinate')
-        self.progress_bar.pack(pady=10)
-        self.lbl_status = ttk.Label(ctrl, text="Statut : Prêt.")
-        self.lbl_status.pack()
-
-    # --- VISUALISATION 3D (Tous les blocs) ---
-    def setup_3d_frame(self, frame):
-        self.fig_3d = plt.figure(figsize=(5, 4))
-        self.ax_3d = self.fig_3d.add_subplot(111, projection='3d')
-        self.canvas_3d = FigureCanvasTkAgg(self.fig_3d, master=frame)
-        self.canvas_3d.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        self.draw_3d_environment([])
-
-    def draw_3d_environment(self, path=None):
-        if not self.master.winfo_exists(): return
-        self.ax_3d.clear()
-        self.ax_3d.view_init(elev=35, azim=-50)
-        
-        # Configuration Grille
-        max_c = self.agent.TAILLE_GRILLE_XY - 1
-        max_a = self.agent.NIVEAUX_ALTITUDE - 1
-        self.ax_3d.set_xlim(0, max_c+1); self.ax_3d.set_ylim(0, max_c+1); self.ax_3d.set_zlim(0, max_a+1)
-        self.ax_3d.set_xlabel("X"); self.ax_3d.set_ylabel("Y"); self.ax_3d.set_zlabel("Alt")
-        self.ax_3d.invert_yaxis()
-
-        # Helper pour dessiner des cubes
-        def draw_voxels(coord_list, color, alpha, label=None):
-            if not coord_list: return
-            for r, c, a in coord_list:
-                self.ax_3d.bar3d(c, r, a, 1, 1, 1, color=color, alpha=alpha, shade=True, edgecolor='gray', linewidth=0.1)
-
-        # Dessin de TOUS les blocs avec transparences différentes
-        draw_voxels(self.agent.coords_obstacles, COLORS["obstacle"], 0.8)
-        draw_voxels(self.agent.zones_thermiques, COLORS["thermique"], 0.3)
-        draw_voxels(self.agent.zones_descendantes, COLORS["descendant"], 0.3)
-        draw_voxels(self.agent.zones_vent, COLORS["vent"], 0.2)
-        draw_voxels(self.agent.zones_inertie, COLORS["inertie"], 0.2)
-
-        # Départ et Cible
-        if self.agent.coords_depart:
-            d = self.agent.coords_depart
-            self.ax_3d.scatter(d[1]+0.5, d[0]+0.5, d[2]+0.5, c=COLORS["depart"], s=100, label="Départ")
-        if self.agent.coords_cible:
-            t = self.agent.coords_cible
-            self.ax_3d.scatter(t[1]+0.5, t[0]+0.5, t[2]+0.5, c=COLORS["cible"], marker='*', s=200, label="Cible")
-
-        # Chemin Optimal
-        if path:
-            xs = [p[1]+0.5 for p in path]
-            ys = [p[0]+0.5 for p in path]
-            zs = [p[2]+0.5 for p in path]
-            self.ax_3d.plot(xs, ys, zs, c="blue", linewidth=2, label="Chemin", marker='o', markersize=3)
-
-        self.canvas_3d.draw()
-
-    # --- Gestion des Événements ---
+    # --- LOGIQUE DESSIN & ETATS ---
     def on_tab_change(self, event):
-        # Rafraichir la 3D quand on clique sur l'onglet
-        if self.notebook.tab(self.notebook.select(), "text") == "Visualisation 3D":
+        tab_id = self.notebook.index(self.notebook.select())
+        if tab_id == 1: 
             self.draw_3d_environment(getattr(self, 'final_optimal_path', []))
 
     def on_grid_click(self, event):
-        """Gestion de l'édition de la map au clic souris."""
         if self.training_in_progress: return
         c, r = event.x // self.CELL_SIZE, event.y // self.CELL_SIZE
         a = self.current_altitude_level.get()
@@ -567,14 +593,14 @@ class QLearningGUI:
         coords = (r, c, a)
         mode = self.edit_mode.get()
         
-        # Nettoyage préalable de la case cliquée
-        for lst in [self.agent.coords_obstacles, self.agent.zones_vent, self.agent.zones_thermiques, 
-                    self.agent.zones_descendantes, self.agent.zones_inertie]:
+        lists_to_check = [self.agent.coords_obstacles, self.agent.zones_vent, self.agent.zones_thermiques, 
+                          self.agent.zones_descendantes, self.agent.zones_inertie]
+        for lst in lists_to_check:
             if coords in lst: lst.remove(coords)
+            
         if coords == self.agent.coords_depart and mode != "depart": self.agent.coords_depart = None
         if coords == self.agent.coords_cible and mode != "cible": self.agent.coords_cible = None
 
-        # Application du nouveau bloc selon le mode
         if mode == "depart": self.agent.coords_depart = coords
         elif mode == "cible": self.agent.coords_cible = coords
         elif mode == "obstacle": self.agent.coords_obstacles.append(coords)
@@ -587,73 +613,105 @@ class QLearningGUI:
         self.update_advice()
 
     def on_altitude_change(self, val):
-        self.draw_grid(self.current_path if self.training_in_progress else getattr(self, 'final_optimal_path', None))
+        val_int = int(float(val))
+        self.current_altitude_level.set(val_int)
+        self.lbl_etage.config(text=f"ALTITUDE (AGL) : {val_int}")
+        path_to_draw = self.current_path if self.training_in_progress else getattr(self, 'final_optimal_path', None)
+        self.draw_grid(path_to_draw)
 
     def draw_grid(self, path=None):
-        """Dessine la grille 2D pour la couche d'altitude sélectionnée."""
         self.canvas_grid.delete("all")
         sz = self.CELL_SIZE
         view_a = self.current_altitude_level.get()
         
-        # 1. Dessin du fond (Map)
+        for i in range(self.agent.TAILLE_GRILLE_XY + 1):
+            self.canvas_grid.create_line(0, i*sz, self.canvas_width, i*sz, fill=COLORS["grid"])
+            self.canvas_grid.create_line(i*sz, 0, i*sz, self.canvas_height, fill=COLORS["grid"])
+
+        def draw_cell(r, c, color, text="", text_color="white"):
+            x, y = c*sz, r*sz
+            self.canvas_grid.create_rectangle(x+1, y+1, x+sz-1, y+sz-1, fill=color, outline=color)
+            if text:
+                self.canvas_grid.create_text(x+sz/2, y+sz/2, text=text, fill=text_color, font=('Segoe UI', 16, 'bold'))
+
         for r in range(self.agent.TAILLE_GRILLE_XY):
             for c in range(self.agent.TAILLE_GRILLE_XY):
-                x, y = c*sz, r*sz
                 coord = (r, c, view_a)
-                col, txt = COLORS["vide"], ""
                 
-                if coord in self.agent.zones_vent: col, txt = COLORS["vent"], "W"
-                elif coord in self.agent.zones_thermiques: col, txt = COLORS["thermique"], "T"
-                elif coord in self.agent.zones_descendantes: col, txt = COLORS["descendant"], "D"
-                elif coord in self.agent.zones_inertie: col, txt = COLORS["inertie"], "I"
-                elif coord in self.agent.coords_obstacles: col, txt = COLORS["obstacle"], ""
+                if coord in self.agent.coords_obstacles: draw_cell(r, c, COLORS["obstacle"])
+                elif coord in self.agent.zones_vent: draw_cell(r, c, COLORS["vent"], "〰")
+                elif coord in self.agent.zones_thermiques: draw_cell(r, c, COLORS["thermique"], "⇧")
+                elif coord in self.agent.zones_descendantes: draw_cell(r, c, COLORS["descendant"], "⇩")
+                elif coord in self.agent.zones_inertie: draw_cell(r, c, COLORS["inertie"], "⚡")
                 
-                if coord == self.agent.coords_depart: col, txt = COLORS["depart"], "A"
-                if coord == self.agent.coords_cible: col, txt = COLORS["cible"], "T"
-                
-                self.canvas_grid.create_rectangle(x, y, x+sz, y+sz, fill=col, outline="gray")
-                # Texte blanc si fond sombre
-                text_col = "white" if col in [COLORS["obstacle"], COLORS["cible"]] else "black"
-                if txt: self.canvas_grid.create_text(x+sz/2, y+sz/2, text=txt, fill=text_col, font=('Arial', 10, 'bold'))
+                if coord == self.agent.coords_depart: draw_cell(r, c, COLORS["depart"], "🛫")
+                if coord == self.agent.coords_cible: draw_cell(r, c, COLORS["cible"], "🎯")
 
-        # 2. Dessin du Chemin (Path)
         if path:
             for i, (r, c, a) in enumerate(path):
                 if a == view_a:
                     cx, cy = c*sz+sz/2, r*sz+sz/2
-                    col = "orange" if i==len(path)-1 else "blue"
-                    self.canvas_grid.create_oval(cx-3, cy-3, cx+3, cy+3, fill=col, outline=col)
+                    col = "#FFD600" if i==len(path)-1 else THEME["accent"]
+                    self.canvas_grid.create_oval(cx-6, cy-6, cx+6, cy+6, fill=col, outline="white", width=2)
                     
-                    # Trait de liaison
                     if i>0:
                          pr, pc, pa = path[i-1]
                          if pa == a:
-                             self.canvas_grid.create_line(pc*sz+sz/2, pr*sz+sz/2, cx, cy, fill="blue", width=2)
+                             self.canvas_grid.create_line(pc*sz+sz/2, pr*sz+sz/2, cx, cy, fill=THEME["accent"], width=3, capstyle=tk.ROUND)
                          else:
-                             # Indication changement altitude
-                             txt = "⬆" if pa < a else "⬇"
-                             self.canvas_grid.create_text(cx, cy, text=txt, fill="purple", font=('Arial', 14, 'bold'))
-        
-        # 3. Dessin de l'Agent (Position actuelle)
-        pos = None
-        if self.replay_running and path: pos = path[self.current_step]
-        elif self.training_in_progress and path: pos = path[-1]
-        elif self.agent.coords_depart: pos = self.agent.coords_depart
-        
-        if pos and pos[2] == view_a:
-            cx, cy = pos[1]*sz+sz/2, pos[0]*sz+sz/2
-            self.canvas_grid.create_oval(cx-8, cy-8, cx+8, cy+8, fill="red", outline="white", width=2)
+                             txt = "▲" if pa < a else "▼"
+                             offset_y = -15 if pa < a else 15
+                             self.canvas_grid.create_text(cx+15, cy+offset_y, text=txt, fill="#D500F9", font=('Arial', 16, 'bold'))
 
-    # --- Logique d'Entraînement ---
+    # --- 3D RENDERING ---
+    def draw_3d_environment(self, path=None):
+        if not self.master.winfo_exists(): return
+        self.ax_3d.clear()
+        self.ax_3d.view_init(elev=35, azim=-50)
+        
+        max_c = self.agent.TAILLE_GRILLE_XY - 1
+        max_a = self.agent.NIVEAUX_ALTITUDE - 1
+        self.ax_3d.set_xlim(0, max_c+1); self.ax_3d.set_ylim(0, max_c+1); self.ax_3d.set_zlim(0, max_a+1)
+        self.ax_3d.set_xlabel("X (Est)"); self.ax_3d.set_ylabel("Y (Nord)"); self.ax_3d.set_zlabel("Z (Alt)")
+        self.ax_3d.invert_yaxis()
+
+        def draw_voxels(coord_list, color, alpha):
+            for r, c, a in coord_list:
+                self.ax_3d.bar3d(c, r, a, 1, 1, 1, color=color, alpha=alpha, shade=True, edgecolor='gray', linewidth=0.1)
+
+        draw_voxels(self.agent.coords_obstacles, COLORS["obstacle"], 0.9)
+        draw_voxels(self.agent.zones_thermiques, COLORS["thermique"], 0.4)
+        draw_voxels(self.agent.zones_descendantes, COLORS["descendant"], 0.4)
+        draw_voxels(self.agent.zones_vent, COLORS["vent"], 0.3)
+        draw_voxels(self.agent.zones_inertie, COLORS["inertie"], 0.3)
+
+        if self.agent.coords_depart:
+            d = self.agent.coords_depart
+            self.ax_3d.scatter(d[1]+0.5, d[0]+0.5, d[2]+0.5, c=COLORS["depart"], s=150, label="Départ", edgecolors='white')
+        if self.agent.coords_cible:
+            t = self.agent.coords_cible
+            self.ax_3d.scatter(t[1]+0.5, t[0]+0.5, t[2]+0.5, c=COLORS["cible"], marker='*', s=300, label="Cible", edgecolors='black')
+
+        if path:
+            xs = [p[1]+0.5 for p in path]
+            ys = [p[0]+0.5 for p in path]
+            zs = [p[2]+0.5 for p in path]
+            self.ax_3d.plot(xs, ys, zs, c="#2962FF", linewidth=3, marker='o', markersize=4, label="Trajectoire")
+        
+        self.canvas_3d.draw()
+
+    # --- ENTRAÎNEMENT ---
     def start_training_manually(self):
         if not self.agent.coords_depart or not self.agent.coords_cible:
-            messagebox.showerror("Erreur", "Placez d'abord un point de Départ (A) et une Cible (T).")
+            messagebox.showwarning("Erreur Configuration", "Définition incomplète : Point de Départ (🛫) et Cible (🎯) requis.")
             return
         
         self.training_in_progress = True
         self.btn_train.config(state=tk.DISABLED)
         self.btn_replay.config(state=tk.DISABLED)
-        self.lbl_status['text'] = "Entraînement en cours..."
+        self.lbl_status['text'] = "Calcul de trajectoire en cours..."
+        self.lbl_status.config(foreground=THEME["warning"])
+        self.progress['value'] = 0
         
         threading.Thread(target=self.run_training, daemon=True).start()
 
@@ -665,23 +723,25 @@ class QLearningGUI:
         self.master.after(0, self.finish_training)
 
     def update_progress(self, ep, rew):
-        self.progress_bar['value'] = ep
-        self.lbl_status['text'] = f"Ep: {ep} | Meilleure Récompense: {rew:.1f}"
+        self.progress['value'] = (ep / self.params.EPISODES) * 100
+        self.lbl_status['text'] = f"Simulation : {ep}/{self.params.EPISODES} | Reward Max : {rew:.1f}"
 
     def update_live(self, path):
         self.current_path = path
-        # Si on est sur l'onglet grille, on rafraichit la vue
-        if self.notebook.tab(self.notebook.select(), "text") == "Éditeur & Replay":
+        if self.notebook.index(self.notebook.select()) == 0: 
             if path and path[-1][2] != self.current_altitude_level.get():
-                self.current_altitude_level.set(path[-1][2]) # Suit l'altitude de l'agent
+                self.current_altitude_level.set(path[-1][2])
+                self.lbl_etage.config(text=f"ALTITUDE (AGL) : {path[-1][2]}")
             self.draw_grid(path)
 
     def finish_training(self):
         self.training_in_progress = False
         self.btn_train.config(state=tk.NORMAL)
         self.btn_replay.config(state=tk.NORMAL)
-        self.lbl_status['text'] = "Entraînement Terminé. Meilleure Récompense :", RECOMPENSE_CIBLE
-        # Calcul du chemin final sans aléatoire
+        self.lbl_status['text'] = "Convergence Atteinte. Solution Disponible."
+        self.lbl_status.config(foreground=THEME["success"])
+        self.progress['value'] = 100
+        
         self.final_optimal_path = obtenir_chemin_optimal(
             self.agent.Q_table, self.agent.coords_depart, self.agent.coords_cible,
             self.agent.coords_obstacles, self.agent.zones_vent,
@@ -690,13 +750,11 @@ class QLearningGUI:
         )
         
         self.draw_grid(self.final_optimal_path)
-        self.draw_3d_environment(self.final_optimal_path)
         self.plot_graphs()
-        messagebox.showinfo("Terminé", "L'entraînement est fini. Vous pouvez visualiser le replay ou la 3D.")
+        messagebox.showinfo("Fin de Simulation", "Le modèle a convergé.\nAnalysez la solution via le Replay ou la vue 3D.")
 
-    # --- Replay ---
     def start_replay(self):
-        if not self.final_optimal_path: return
+        if not hasattr(self, 'final_optimal_path') or not self.final_optimal_path: return
         self.replay_running = True
         self.current_path = self.final_optimal_path
         self.current_step = 0
@@ -705,33 +763,159 @@ class QLearningGUI:
 
     def loop_replay(self):
         if not self.replay_running: return
-        
         if self.current_step < len(self.current_path):
             p = self.current_path[self.current_step]
-            if p[2] != self.current_altitude_level.get(): self.current_altitude_level.set(p[2])
+            if p[2] != self.current_altitude_level.get(): 
+                self.current_altitude_level.set(p[2])
+                self.lbl_etage.config(text=f"ALTITUDE (AGL) : {p[2]}")
             
             self.draw_grid(self.current_path[:self.current_step+1])
             self.current_step += 1
-            self.master.after(150, self.loop_replay)
+            self.master.after(200, self.loop_replay)
         else:
             self.replay_running = False
             self.btn_replay.config(state=tk.NORMAL)
-            self.lbl_status['text'] = "Replay terminé."
+
+    def plot_graphs(self):
+        self.ax_conv.clear()
+        if self.agent.historique_recompenses:
+            self.ax_conv.plot(self.agent.historique_recompenses, color='#B0BEC5', alpha=0.5, label="Signal Brut")
+            w = 50
+            if len(self.agent.historique_recompenses) > w:
+                avg = np.convolve(self.agent.historique_recompenses, np.ones(w)/w, mode='valid')
+                self.ax_conv.plot(np.arange(w-1, len(self.agent.historique_recompenses)), avg, color=THEME["accent"], label="Moyenne Mobile", linewidth=2)
+        
+        self.ax_conv.set_title("Stabilité de l'Apprentissage", fontsize=10)
+        self.ax_conv.grid(True, linestyle=':', alpha=0.6)
+        self.canvas_chart.draw()
+        
+        p = self.final_optimal_path
+        self.ax_alt.clear(); self.ax_reward.clear()
+        if p and len(p) > 1:
+            steps = range(len(p))
+            self.ax_alt.step(steps, [x[2] for x in p], color=THEME["accent"], where='mid', linewidth=2)
+            self.ax_alt.set_ylabel("Altitude Z")
+            self.ax_alt.grid(True, alpha=0.3)
             
+            rewards = []
+            cum = 0
+            for i in range(len(p)-1):
+                curr, nxt = p[i], p[i+1]
+                r_step = -1 
+                if nxt == self.agent.coords_cible: r_step += 1000
+                cum += r_step
+                rewards.append(cum)
             
-            
-    def export_map(self):
-        """Sauvegarde la configuration actuelle dans un JSON."""
+            self.ax_reward.plot(rewards, color=THEME["success"], linewidth=2)
+            self.ax_reward.set_ylabel("Score Cumulé")
+            self.ax_reward.set_xlabel("Waypoints")
+            self.ax_reward.grid(True, alpha=0.3)
+
+        self.fig_stats.tight_layout()
+        self.canvas_stats.draw()
+
+    # --- PARAMÈTRES & DOC ---
+    def apply_params(self):
         if self.training_in_progress: 
-            messagebox.showwarning("Attention", "Impossible d'exporter pendant l'entraînement.")
+            messagebox.showwarning("Opération Impossible", "Simulation en cours d'exécution.")
             return
 
-        filepath = filedialog.asksaveasfilename(
-            defaultextension=".json", 
-            filetypes=[("Fichier JSON", "*.json")]
-        )
-        if not filepath: return
+        self.params.EPISODES = self.var_episodes.get()
+        self.params.ALPHA = self.var_alpha.get()
+        self.params.GAMMA = self.var_gamma.get()
+        self.params.EPSILON_INIT = self.var_epsilon.get()
 
+        new_alt = self.var_altitude_max.get()
+        new_alt = max(1, min(10, new_alt)) 
+        
+        if new_alt != self.agent.NIVEAUX_ALTITUDE:
+            self.agent.NIVEAUX_ALTITUDE = new_alt
+            self.agent.TAILLE_ETAT = self.agent.TAILLE_GRILLE_XY * self.agent.TAILLE_GRILLE_XY * new_alt
+            self.agent.reset_for_training()
+            
+            features = [self.agent.coords_obstacles, self.agent.zones_vent, self.agent.zones_thermiques, 
+                        self.agent.zones_descendantes, self.agent.zones_inertie]
+            for feature_list in features:
+                feature_list[:] = [coord for coord in feature_list if coord[2] < new_alt]
+            
+            if self.agent.coords_depart and self.agent.coords_depart[2] >= new_alt: self.agent.coords_depart = (9, 0, 0)
+            if self.agent.coords_cible and self.agent.coords_cible[2] >= new_alt: self.agent.coords_cible = (0, 9, new_alt-1)
+            
+            self.current_altitude_level.set(0)
+            self.scale_alt.config(to=new_alt-1)
+            self.draw_grid()
+            messagebox.showinfo("Système", f"Configuration spatiale mise à jour : {new_alt} couches.")
+        
+        self.update_advice()
+        messagebox.showinfo("Système", "Paramètres enregistrés.")
+
+    def update_advice(self):
+        c = self.params.calculer_episodes_conseilles(self.agent.coords_obstacles)
+        self.lbl_advice.config(text=f"ℹ Estimation : Convergence attendue vers ~{c} itérations.")
+
+    def show_help(self):
+        help_win = tk.Toplevel(self.master)
+        help_win.title("Manuel Technique de Simulation")
+        help_win.geometry("800x650")
+        help_win.configure(bg="white")
+        
+        txt = tk.Text(help_win, wrap="word", font=("Segoe UI", 10), padx=40, pady=30, borderwidth=0)
+        txt.pack(fill="both", expand=True)
+        
+        content = """
+        MANUEL TECHNIQUE DE SIMULATION & CONTRÔLE DE VOL
+        ==================================================
+
+        1. ARCHITECTURE DU SYSTÈME
+        --------------------------
+        Ce logiciel implémente un agent autonome basé sur l'apprentissage par renforcement (Q-Learning) 
+        pour la navigation de drone en environnement 3D contraint. L'agent apprend une politique optimale π(s) 
+        en maximisant la récompense cumulée à travers des épisodes d'exploration/exploitation.
+
+        2. PARAMÉTRAGE DE L'ESPACE AÉRIEN
+        ---------------------------------
+        L'environnement est discrétisé en voxels (Cases 3D). L'utilisateur doit définir la topologie 
+        avant de lancer la simulation.
+        
+        [Contrôles]
+        > ALTITUDE (AGL) : Utilisez le slider latéral pour naviguer entre les couches Z (0=Sol, Max=Plafond).
+        > Outils de Design : Sélectionnez un outil et cliquez sur la grille pour modifier l'état du voxel.
+
+        [Légende des Entités]
+        🛫 DÉPART (Start) : Point d'insertion du vecteur.
+        🎯 CIBLE (Target) : Coordonnée objectif. Atteindre ce point termine l'épisode avec succès.
+        ⬛ OBSTACLE (NFZ) : Structure solide. Collision fatale.
+
+        3. DYNAMIQUE DES FLUIDES & CONTRAINTES
+        --------------------------------------
+        L'environnement simule des phénomènes aérologiques affectant la consommation énergétique 
+        et la stabilité du vol.
+
+        〰 TURBULENCES (Drag) : Zone de haute densité/friction. Augmente le coût de déplacement.
+           Impact : Pénalité de score (-4).
+        
+        ⇧ ASCENDANCE THERMIQUE (Lift) : Flux d'air vertical chaud.
+           Impact : Facilite l'ascension (Bonus +5). Pénalise la descente contre le flux.
+        
+        ⇩ FLUX RABATTANT (Sink) : Flux d'air vertical froid.
+           Impact : Facilite la descente (Bonus +5). Pénalise l'ascension contre le flux.
+        
+        ⚡ CISAILLEMENT (Wind Shear) : Instabilité vectorielle majeure.
+           Impact : Introduit une composante stochastique (50% de probabilité de dérive latérale involontaire).
+
+        4. PROTOCOLE D'EXPÉRIMENTATION
+        ------------------------------
+        A. Initialisation : Définir Départ, Cible et Obstacles.
+        B. Simulation : Lancer l'entraînement via "INITIALISER SIMULATION".
+        C. Analyse : Vérifier la convergence via la courbe "Stabilité de l'Apprentissage".
+        D. Validation : Visualiser la trajectoire finale via le Replay ou la Vue 3D.
+        """
+        txt.insert("1.0", content)
+        txt.config(state="disabled")
+
+    def export_map(self):
+        filepath = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if not filepath: return
         data = {
             "taille_xy": self.agent.TAILLE_GRILLE_XY,
             "niveaux_altitude": self.agent.NIVEAUX_ALTITUDE,
@@ -743,32 +927,24 @@ class QLearningGUI:
             "descendants": self.agent.zones_descendantes,
             "inertie": self.agent.zones_inertie
         }
-        
         try:
-            with open(filepath, 'w') as f:
-                json.dump(data, f, indent=4)
-            messagebox.showinfo("Succès", "La map a été exportée correctement.")
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur lors de l'exportation :\n{e}")
+            with open(filepath, 'w') as f: json.dump(data, f, indent=4)
+            messagebox.showinfo("Export", "Cartographie exportée avec succès.")
+        except Exception as e: messagebox.showerror("Erreur", str(e))
 
     def import_map(self):
-        """Charge une configuration depuis un JSON."""
-        if self.training_in_progress: return
-
-        filepath = filedialog.askopenfilename(filetypes=[("Fichier JSON", "*.json")])
+        filepath = filedialog.askopenfilename(filetypes=[("JSON", "*.json")])
         if not filepath: return
-
         try:
-            with open(filepath, 'r') as f:
-                data = json.load(f)
-            
-            # Vérification de la compatibilité
-            if (data["taille_xy"] != self.agent.TAILLE_GRILLE_XY or 
-                data["niveaux_altitude"] != self.agent.NIVEAUX_ALTITUDE):
-                messagebox.showerror("Erreur", "La map chargée ne correspond pas aux dimensions de la grille actuelle.")
+            with open(filepath, 'r') as f: data = json.load(f)
+            if data["taille_xy"] != self.agent.TAILLE_GRILLE_XY:
+                messagebox.showerror("Erreur", "Incompatibilité dimensionnelle.")
                 return
-
-            # Chargement des données (conversion en tuples nécessaire pour les listes de coords)
+            
+            self.agent.NIVEAUX_ALTITUDE = data.get("niveaux_altitude", 3)
+            self.scale_alt.config(to=self.agent.NIVEAUX_ALTITUDE-1)
+            self.var_altitude_max.set(self.agent.NIVEAUX_ALTITUDE)
+            
             self.agent.coords_depart = tuple(data["depart"]) if data["depart"] else None
             self.agent.coords_cible = tuple(data["cible"]) if data["cible"] else None
             self.agent.coords_obstacles = [tuple(x) for x in data["obstacles"]]
@@ -777,127 +953,16 @@ class QLearningGUI:
             self.agent.zones_descendantes = [tuple(x) for x in data["descendants"]]
             self.agent.zones_inertie = [tuple(x) for x in data["inertie"]]
             
-            # Mise à jour de l'affichage
             self.draw_grid()
-            self.draw_3d_environment()
             self.update_advice()
-            messagebox.showinfo("Succès", "Map importée avec succès.")
-            
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Impossible de lire le fichier :\n{e}")
-    
+            messagebox.showinfo("Import", "Cartographie chargée.")
+        except Exception as e: messagebox.showerror("Erreur", str(e))
 
-    def plot_graphs(self):
-        # --- 1. Graphique de Convergence (Apprentissage) ---
-        self.ax_conv.clear()
-        if self.agent.historique_recompenses:
-            # A. Récompenses brutes (Gris transparent)
-            self.ax_conv.plot(self.agent.historique_recompenses, color='gray', alpha=0.3, label="Brut", linewidth=0.8)
-
-            # B. Moyenne Glissante (Rouge)
-            w = 50
-            if len(self.agent.historique_recompenses) > w:
-                avg = np.convolve(self.agent.historique_recompenses, np.ones(w)/w, mode='valid')
-                # On décale l'axe X pour aligner visuellement la moyenne
-                self.ax_conv.plot(np.arange(w-1, len(self.agent.historique_recompenses)), avg, color='red', label="Moyenne", linewidth=2)
-        
-        self.ax_conv.set_title("Convergence de l'apprentissage")
-        self.ax_conv.set_xlabel("Épisodes")
-        self.ax_conv.set_ylabel("Récompense")
-        self.ax_conv.legend()
-        self.ax_conv.grid(True, alpha=0.3)
-        self.canvas_chart.draw()
-        
-        # --- 2. Stats du chemin optimal ---
-        p = self.final_optimal_path
-        self.ax_pos.clear(); self.ax_alt.clear(); self.ax_reward.clear()
-        
-        if p and len(p) > 1:
-            # --- Graph 1 : Vue en Plongée (Trajectoire 2D X/Y) ---
-            cols = [x[1] for x in p] # Colonne (X)
-            rows = [x[0] for x in p] # Ligne (Y)
-            
-            # Tracé du chemin (Vue de dessus)
-            self.ax_pos.plot(cols, rows, marker='.', linestyle='-', color='blue', label='Trajet')
-            
-            # Départ (Rouge) et Arrivée (Vert)
-            self.ax_pos.plot(cols[0], rows[0], marker='o', color='red', markersize=8, label='Départ')
-            self.ax_pos.plot(cols[-1], rows[-1], marker='*', color='green', markersize=12, label='Arrivée')
-            
-            # Configuration "Carte"
-            self.ax_pos.set_title("Trajectoire 2D (Vue de dessus)")
-            self.ax_pos.set_xlabel("Colonnes (X)")
-            self.ax_pos.set_ylabel("Lignes (Y)")
-            self.ax_pos.invert_yaxis()    # Important : (0,0) en haut à gauche
-            self.ax_pos.set_aspect('equal') # Garder les proportions carrées
-            self.ax_pos.grid(True, linestyle=':')
-            self.ax_pos.legend(loc='best', fontsize='small')
-
-            # --- Graph 2 : Altitude (Z) vs Temps ---
-            steps = range(len(p))
-            self.ax_alt.plot(steps, [x[2] for x in p], color='green', marker='o')
-            self.ax_alt.set_title("Altitude (Z)")
-            self.ax_alt.set_xlabel("Étapes")
-            self.ax_alt.set_ylabel("Niveau Z")
-            self.ax_alt.set_yticks(range(self.agent.NIVEAUX_ALTITUDE))
-            self.ax_alt.grid(True)
-            
-            # --- Graph 3 : Récompense Cumulée ---
-            rewards = []
-            cum = 0
-            for i in range(len(p)-1):
-                curr = p[i]
-                nxt = p[i+1]
-                # Retrouver l'action par déduction
-                dr, dc, da = nxt[0]-curr[0], nxt[1]-curr[1], nxt[2]-curr[2]
-                act = -1
-                if dr == -1: act = 0
-                elif dr == 1: act = 1
-                elif dc == -1: act = 2
-                elif dc == 1: act = 3
-                elif da == 1: act = 4
-                elif da == -1: act = 5
-                
-                if act != -1:
-                    _, r, _ = obtenir_etat_recompense_suivants(
-                        curr, act, self.agent.coords_cible, self.agent.coords_obstacles,
-                        self.agent.zones_vent, self.agent.zones_thermiques, 
-                        self.agent.zones_descendantes, self.agent.zones_inertie,
-                        self.agent.TAILLE_GRILLE_XY, self.agent.NIVEAUX_ALTITUDE,
-                        mode_stochastique=False
-                    )
-                    
-                    if nxt == self.agent.coords_cible:
-                        r -= RECOMPENSE_CIBLE
-                    
-                    cum += r
-                    rewards.append(cum)
-            
-            if rewards:
-                self.ax_reward.plot(rewards, color='purple')
-                self.ax_reward.set_title("Score Cumulé")
-                self.ax_reward.set_xlabel("Étapes")
-                self.ax_reward.grid(True)
-
-        self.fig_stats.tight_layout()
-        self.canvas_stats.draw()
-
-
-# --- POINT D'ENTRÉE MAIN ---
 if __name__ == "__main__":
-    # On définit l'altitude par défaut ici (ex: 3)
-    # L'utilisateur pourra la changer ensuite dans l'onglet "Paramètres"
     DEFAULT_ALTITUDE = 3
-    
-    # Initialisation de l'application
     params = QLearningParameters(TAILLE_GRILLE_XY * TAILLE_GRILLE_XY * DEFAULT_ALTITUDE, NB_ACTIONS)
     agent = QLearningAgent(params, TAILLE_GRILLE_XY, DEFAULT_ALTITUDE)
     
     root = tk.Tk()
-    
-    # Configuration du style pour que ce soit un peu plus moderne
-    style = ttk.Style()
-    style.theme_use('clam')
-    
-    gui = QLearningGUI(root, agent, params)
+    app = QLearningGUI(root, agent, params)
     root.mainloop()
