@@ -788,51 +788,69 @@ class QLearningGUI:
             messagebox.showerror("Erreur", f"Impossible de lire le fichier :\n{e}")
     
 
-    # --- Tracé des Courbes ---
     def plot_graphs(self):
-        # 1. Convergence
+        # --- 1. Graphique de Convergence (Apprentissage) ---
         self.ax_conv.clear()
         if self.agent.historique_recompenses:
-            # Moyenne glissante
-            w = 100
+            # A. Récompenses brutes (Gris transparent)
+            self.ax_conv.plot(self.agent.historique_recompenses, color='gray', alpha=0.3, label="Brut", linewidth=0.8)
+
+            # B. Moyenne Glissante (Rouge)
+            w = 50
             if len(self.agent.historique_recompenses) > w:
-                self.ax_conv.plot(self.agent.historique_recompenses, color='gray', alpha=0.3, label="Brut", linewidth=0.8)
                 avg = np.convolve(self.agent.historique_recompenses, np.ones(w)/w, mode='valid')
-                self.ax_conv.plot(avg, color='red', label="Moyenne")
-            else:
-                self.ax_conv.plot(self.agent.historique_recompenses, color='gray', alpha=0.5)
+                # On décale l'axe X pour aligner visuellement la moyenne
+                self.ax_conv.plot(np.arange(w-1, len(self.agent.historique_recompenses)), avg, color='red', label="Moyenne", linewidth=2)
+        
         self.ax_conv.set_title("Convergence de l'apprentissage")
-        self.ax_conv.grid(True)
+        self.ax_conv.set_xlabel("Épisodes")
+        self.ax_conv.set_ylabel("Récompense")
+        self.ax_conv.legend()
+        self.ax_conv.grid(True, alpha=0.3)
         self.canvas_chart.draw()
         
-        # 2. Stats du chemin optimal
+        # --- 2. Stats du chemin optimal ---
         p = self.final_optimal_path
         self.ax_pos.clear(); self.ax_alt.clear(); self.ax_reward.clear()
         
         if p and len(p) > 1:
+            # --- Graph 1 : Vue en Plongée (Trajectoire 2D X/Y) ---
+            cols = [x[1] for x in p] # Colonne (X)
+            rows = [x[0] for x in p] # Ligne (Y)
+            
+            # Tracé du chemin (Vue de dessus)
+            self.ax_pos.plot(cols, rows, marker='.', linestyle='-', color='blue', label='Trajet')
+            
+            # Départ (Rouge) et Arrivée (Vert)
+            self.ax_pos.plot(cols[0], rows[0], marker='o', color='red', markersize=8, label='Départ')
+            self.ax_pos.plot(cols[-1], rows[-1], marker='*', color='green', markersize=12, label='Arrivée')
+            
+            # Configuration "Carte"
+            self.ax_pos.set_title("Trajectoire 2D (Vue de dessus)")
+            self.ax_pos.set_xlabel("Colonnes (X)")
+            self.ax_pos.set_ylabel("Lignes (Y)")
+            self.ax_pos.invert_yaxis()    # Important : (0,0) en haut à gauche
+            self.ax_pos.set_aspect('equal') # Garder les proportions carrées
+            self.ax_pos.grid(True, linestyle=':')
+            self.ax_pos.legend(loc='best', fontsize='small')
+
+            # --- Graph 2 : Altitude (Z) vs Temps ---
             steps = range(len(p))
-            self.ax_pos.plot(steps, [x[1] for x in p], label="X (Col)")
-            self.ax_pos.plot(steps, [x[0] for x in p], label="Y (Ligne)")
-            self.ax_pos.legend()
-            self.ax_pos.set_title("Position X/Y")
-            self.ax_pos.grid()
-            
             self.ax_alt.plot(steps, [x[2] for x in p], color='green', marker='o')
-            self.ax_alt.set_title("Altitude Z")
+            self.ax_alt.set_title("Altitude (Z)")
+            self.ax_alt.set_xlabel("Étapes")
+            self.ax_alt.set_ylabel("Niveau Z")
             self.ax_alt.set_yticks(range(self.agent.NIVEAUX_ALTITUDE))
-            self.ax_alt.grid()
+            self.ax_alt.grid(True)
             
-            # Recalcul de la récompense cumulée pour le graphe
-            # On réutilise la logique physique pour être précis
+            # --- Graph 3 : Récompense Cumulée ---
             rewards = []
             cum = 0
             for i in range(len(p)-1):
                 curr = p[i]
                 nxt = p[i+1]
-                # Retrouver l'action (simplifié ici par déduction)
+                # Retrouver l'action par déduction
                 dr, dc, da = nxt[0]-curr[0], nxt[1]-curr[1], nxt[2]-curr[2]
-                
-                # Déduire index action
                 act = -1
                 if dr == -1: act = 0
                 elif dr == 1: act = 1
@@ -849,15 +867,14 @@ class QLearningGUI:
                         self.agent.TAILLE_GRILLE_XY, self.agent.NIVEAUX_ALTITUDE,
                         mode_stochastique=False
                     )
-                    # Si c'est la dernière étape et qu'on atteint la cible, le moteur renvoie le gros bonus
-                    # mais il est déjà inclus dans r via la fonction
                     cum += r
                     rewards.append(cum)
             
             if rewards:
-                self.ax_reward.plot(rewards, color='red')
-                self.ax_reward.set_title("Récompense Cumulée")
-                self.ax_reward.grid()
+                self.ax_reward.plot(rewards, color='purple')
+                self.ax_reward.set_title("Score Cumulé")
+                self.ax_reward.set_xlabel("Étapes")
+                self.ax_reward.grid(True)
 
         self.fig_stats.tight_layout()
         self.canvas_stats.draw()
