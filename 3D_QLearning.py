@@ -7,12 +7,12 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
 import json 
-from mpl_toolkits.mplot3d import Axes3D # <-- NOUVEL IMPORT 3D
+from mpl_toolkits.mplot3d import Axes3D
 
-# --- 1. Définition de l'environnement 3D (Drone) et Paramètres ---
+# --- 1. Définition de l'environnement 3D (Drone) et Paramètres Statiques ---
 TAILLE_GRILLE_XY = 10
 NIVEAUX_ALTITUDE = 3
-TAILLE_ETAT = TAILLE_GRILLE_XY * TAILLE_GRILLE_XY * NIVEAUX_ALTITUDE
+TAILLE_ETAT_BASE = TAILLE_GRILLE_XY * TAILLE_GRILLE_XY * NIVEAUX_ALTITUDE
 
 ACTIONS = {
     0: 'HAUT_2D',    # (r-1, c, a)
@@ -29,9 +29,36 @@ RECOMPENSE_COLLISION = -50
 RECOMPENSE_MOUVEMENT_2D = -1
 RECOMPENSE_MOUVEMENT_3D = -3
 RECOMPENSE_PENALITE_VENT = -4
-EPISODES = 20000
+# EPISODES = 20000 -> Déplacé dans la classe de paramètres
 
-# --- Fonctions de l'Environnement 3D ---
+# --- Classe pour gérer les paramètres (NOUVEAU) ---
+class QLearningParameters:
+    def __init__(self, taille_etat_base, nb_actions):
+        self.TAILLE_ETAT_BASE = taille_etat_base
+        self.NB_ACTIONS = nb_actions
+        
+        # Hyperparamètres par défaut
+        self.EPISODES = 20000
+        self.ALPHA = 0.1  # Taux d'apprentissage
+        self.GAMMA = 0.9  # Facteur d'actualisation
+        self.EPSILON_INIT = 1.0 # Epsilon initial
+        self.DECAY_EPSILON = 0.9998 
+        self.MIN_EPSILON = 0.01
+
+    def calculer_episodes_conseilles(self, coords_obstacles):
+        """Calcule un nombre d'épisodes conseillé basé sur la complexité."""
+        nombre_etats_libres = self.TAILLE_ETAT_BASE - len(coords_obstacles)
+        
+        # Algorithme simple : plus il y a d'états libres, plus il faut d'épisodes.
+        # Facteur de base multiplié par la taille de l'espace.
+        facteur_complexite = 1.0 # 1.0 pour une grille simple, ajuster si besoin
+        
+        # Min 5000, Max 50000. Utilise l'heuristique (états libres * 200)
+        conseil = int(nombre_etats_libres * 200 * facteur_complexite)
+        
+        return max(5000, min(22000, conseil))
+
+# --- Fonctions de l'Environnement 3D (restent inchangées) ---
 def coords_to_idx(coords, taille_xy, niveaux_altitude):
     r, c, a = coords
     taille_couche_xy = taille_xy * taille_xy
@@ -39,7 +66,7 @@ def coords_to_idx(coords, taille_xy, niveaux_altitude):
 
 def initialiser_positions_3d(taille_xy, niveaux_alt):
     coords_depart = (taille_xy - 1, 0, 0)
-    coords_cible = (0, taille_xy - 1, 2)
+    coords_cible = (0, taille_xy - 1, niveaux_alt - 1) # Modifié pour être toujours au niveau le plus haut
     coords_obstacles = []
     zones_vent = []
     
@@ -94,10 +121,11 @@ def obtenir_etat_recompense_suivants(etat_courant, action_index, coords_cible, c
     
     return nouvel_etat, recompense, False 
 
-# --- 2. Classe QLearningAgent ---
+# --- 2. Classe QLearningAgent (MODIFIÉE) ---
 class QLearningAgent:
-    def __init__(self, episodes, taille_xy, niveaux_altitude):
-        self.EPISODES = episodes
+    # L'agent prend maintenant l'instance de paramètres
+    def __init__(self, params: QLearningParameters, taille_xy, niveaux_altitude):
+        self.params = params
         self.TAILLE_GRILLE_XY = taille_xy
         self.NIVEAUX_ALTITUDE = niveaux_altitude
         
@@ -110,12 +138,7 @@ class QLearningAgent:
         self.historique_recompenses = []
         self.meilleure_recompense = -float('inf')
         self.meilleur_chemin = []
-        
-        self.ALPHA = 0.1
-        self.GAMMA = 0.9
-        self.EPSILON = 1
-        self.DECAY_EPSILON = 0.9998 
-        self.MIN_EPSILON = 0.01
+        self.EPSILON = self.params.EPSILON_INIT # Initialisation EPSILON
 
         nombre_etats_libres = self.TAILLE_ETAT - len(self.coords_obstacles)
         facteur_allongement = 2.5 
@@ -125,13 +148,30 @@ class QLearningAgent:
         if self.MAX_STEPS_EPISODE < min_steps: 
              self.MAX_STEPS_EPISODE = min_steps
         
-    def train(self, progress_callback=None):
+    def reset_for_training(self):
+        """Réinitialise l'état de l'agent pour un nouvel entraînement."""
         self.historique_recompenses = []
         self.Q_table = np.zeros((self.TAILLE_ETAT, NB_ACTIONS))
-        self.EPSILON = 1.0
+        self.EPSILON = self.params.EPSILON_INIT
         self.meilleure_recompense = -float('inf')
+        self.meilleur_chemin = []
+
+
+    # Ajout d'un callback pour la visualisation en direct (MODIFIÉ)
+    def train(self, progress_callback=None, live_path_callback=None):
+        self.reset_for_training()
         
-        for episode in range(self.EPISODES):
+        # Variables locales pour les paramètres pour éviter d'accéder constamment à self.params
+        ALPHA = self.params.ALPHA
+        GAMMA = self.params.GAMMA
+        DECAY_EPSILON = self.params.DECAY_EPSILON
+        MIN_EPSILON = self.params.MIN_EPSILON
+        EPISODES = self.params.EPISODES
+        
+        # Contrôle de la fréquence de mise à jour du chemin en direct
+        path_update_interval = max(1, EPISODES // 200) # Mise à jour environ 200 fois max
+
+        for episode in range(EPISODES):
             etat_coords_courant = self.coords_depart
             
             if etat_coords_courant is None:
@@ -167,7 +207,8 @@ class QLearningAgent:
                 
                 q_value_ancien = self.Q_table[etat_idx_courant, action_index]
                 max_q_suivant = np.max(self.Q_table[etat_idx_suivant, :]) if not termine_env else 0
-                q_value_nouveau = (1 - self.ALPHA) * q_value_ancien + self.ALPHA * (recompense + self.GAMMA * max_q_suivant)
+                # Utilise self.params.ALPHA et self.params.GAMMA
+                q_value_nouveau = (1 - ALPHA) * q_value_ancien + ALPHA * (recompense + GAMMA * max_q_suivant)
                 self.Q_table[etat_idx_courant, action_index] = q_value_nouveau
                 
                 etat_coords_courant = etat_coords_suivant
@@ -181,8 +222,9 @@ class QLearningAgent:
                 else:
                     termine = termine_env
                     
-            if self.EPSILON > self.MIN_EPSILON:
-                self.EPSILON *= self.DECAY_EPSILON
+            # Utilise self.params.DECAY_EPSILON et self.params.MIN_EPSILON
+            if self.EPSILON > MIN_EPSILON:
+                self.EPSILON *= DECAY_EPSILON
 
             self.historique_recompenses.append(recompense_episode)
             
@@ -190,13 +232,18 @@ class QLearningAgent:
                 self.meilleure_recompense = recompense_episode
                 self.meilleur_chemin = list(chemin_episode)
             
+            # Callback pour la progression de l'entraînement
             if progress_callback:
                 progress_callback(episode + 1, self.meilleure_recompense)
+                
+            # Callback pour la visualisation en direct (NOUVEAU)
+            if live_path_callback and (episode + 1) % path_update_interval == 0:
+                 live_path_callback(chemin_episode)
                 
         return self.Q_table, self.meilleur_chemin, self.meilleure_recompense, self.historique_recompenses
 
 
-# --- 3. Fonction obtenir_chemin_optimal ---
+# --- 3. Fonction obtenir_chemin_optimal (inchangée) ---
 def obtenir_chemin_optimal(Q_table, coords_depart, coords_cible, coords_obstacles, zones_vent, taille_xy, niveaux_alt):
     
     if coords_depart is None or coords_cible is None:
@@ -226,8 +273,6 @@ def obtenir_chemin_optimal(Q_table, coords_depart, coords_cible, coords_obstacle
         
         if termine and etat_coords_suivant != coords_cible:
             break
-        # NOTE: La suppression de la boucle infinie de chemin est délicate dans les chemins 3D, 
-        # mais la limite d'étapes le gère principalement. On laisse le code original.
 
         chemin.append(etat_coords_suivant)
         etat_coords_courant = etat_coords_suivant
@@ -235,12 +280,13 @@ def obtenir_chemin_optimal(Q_table, coords_depart, coords_cible, coords_obstacle
         
     return chemin
 
-# --- 4. Interface Graphique (GUI) (MODIFIÉE POUR 3D) ---
+# --- 4. Interface Graphique (GUI) (MODIFIÉE POUR LES PARAMÈTRES ET LE LIVE PATH) ---
 
 class QLearningGUI:
-    def __init__(self, master, agent):
+    def __init__(self, master, agent, params):
         self.master = master
         self.agent = agent
+        self.params = params # Référence aux paramètres
         master.title(f"Q-Learning Agent - Drone 3D ({TAILLE_GRILLE_XY}x{TAILLE_GRILLE_XY}x{NIVEAUX_ALTITUDE})")
         
         self.CELL_SIZE = 40 
@@ -253,8 +299,8 @@ class QLearningGUI:
         self.training_in_progress = False
         self.training_finished = False
         
-        self.current_altitude_level = tk.IntVar(value=0)
-        self.final_optimal_path = [] # Ajout pour initialisation
+        self.current_altitude_level = tk.IntVar(value=self.agent.coords_depart[2] if self.agent.coords_depart else 0)
+        self.final_optimal_path = [] 
 
         self.notebook = ttk.Notebook(master)
         self.notebook.pack(pady=10, padx=10, fill="both", expand=True)
@@ -274,18 +320,134 @@ class QLearningGUI:
         self.notebook.add(self.frame_stats, text="Statistiques du Chemin")
         self.setup_stats_frame(self.frame_stats)
         
-        # 4. Visualisation 3D Isométrique (NOUVEAU)
+        # 4. Visualisation 3D Isométrique
         self.frame_3d = ttk.Frame(self.notebook)
         self.notebook.add(self.frame_3d, text="Visualisation 3D Isométrique")
         self.setup_3d_frame(self.frame_3d)
         
-        self.clear_environment_for_editor()
+        # 5. Paramètres Q-Learning (NOUVEAU)
+        self.frame_params = ttk.Frame(self.notebook)
+        self.notebook.add(self.frame_params, text="Paramètres Q-Learning")
+        self.setup_params_frame(self.frame_params) # NOUVEL APPEL
+        
         self.canvas_grid.bind("<Button-1>", self.on_grid_click)
         self.draw_grid()
         
-        # Lie l'événement de changement d'onglet pour mettre à jour la vue 3D
         self.notebook.bind("<<NotebookTabChanged>>", self.on_tab_change)
 
+    # --- NOUVEAU : Configuration de l'onglet Paramètres ---
+    def setup_params_frame(self, frame):
+        """Configure les champs d'édition pour les hyperparamètres."""
+        
+        # Variables de contrôle pour les Entry
+        self.var_episodes = tk.IntVar(value=self.params.EPISODES)
+        self.var_alpha = tk.DoubleVar(value=self.params.ALPHA)
+        self.var_gamma = tk.DoubleVar(value=self.params.GAMMA)
+        self.var_epsilon_init = tk.DoubleVar(value=self.params.EPSILON_INIT)
+        self.var_decay = tk.DoubleVar(value=self.params.DECAY_EPSILON)
+        self.var_min_epsilon = tk.DoubleVar(value=self.params.MIN_EPSILON)
+        
+        main_frame = ttk.Frame(frame, padding="15")
+        main_frame.pack(fill='both', expand=True)
+        
+        # Titre
+        ttk.Label(main_frame, text="Hyperparamètres de l'Agent Q-Learning", font=('Arial', 14, 'bold')).pack(pady=(0, 50))
+        
+        # Création des champs de saisie
+        fields = [
+            ("Nombre d'Épisodes (EPISODES):", self.var_episodes),
+            ("Taux d'Apprentissage (ALPHA):", self.var_alpha),
+            ("Facteur d'Actualisation (GAMMA):", self.var_gamma),
+            ("Epsilon Initial (EPSILON_INIT):", self.var_epsilon_init),
+            ("Taux de Décroissance Epsilon (DECAY_EPSILON):", self.var_decay),
+            ("Epsilon Minimum (MIN_EPSILON):", self.var_min_epsilon),
+        ]
+        
+        for label_text, var in fields:
+            row_frame = ttk.Frame(main_frame)
+            row_frame.pack(fill='x', pady=5)
+            
+            ttk.Label(row_frame, text=label_text, width=30).pack(side=tk.LEFT)
+            entry = ttk.Entry(row_frame, textvariable=var, width=15)
+            entry.pack(side=tk.LEFT, padx=10)
+        
+        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=20)
+        
+        # Zone des conseils et bouton d'application
+        
+        # Conseil en Épisodes
+        self.label_conseil = ttk.Label(main_frame, text="", foreground="blue")
+        self.label_conseil.pack(pady=5, anchor='w')
+        self.update_episode_advice()
+        
+        # Bouton Appliquer
+        self.button_apply = ttk.Button(main_frame, text="Appliquer les Paramètres", command=self.apply_parameters)
+        self.button_apply.pack(pady=15)
+        
+        # Bouton Réinitialiser
+        self.button_reset = ttk.Button(main_frame, text="Réinitialiser aux Valeurs par Défaut", command=self.reset_parameters)
+        self.button_reset.pack(pady=5)
+        
+        self.label_status_params = ttk.Label(main_frame, text="Statut: Paramètres par défaut.", foreground="red")
+        self.label_status_params.pack(pady=10)
+
+
+    def update_episode_advice(self):
+        """Met à jour l'affichage du conseil en épisodes."""
+        conseil = self.params.calculer_episodes_conseilles(self.agent.coords_obstacles)
+        self.label_conseil.config(text=f"Conseil : 10000 pour simple, 20000 pour normal, 30000 pour complexe.")
+
+    def apply_parameters(self):
+        """Applique les valeurs des Entry à l'objet params de l'agent."""
+        if self.training_in_progress:
+            messagebox.showwarning("Action impossible", "Veuillez attendre la fin de l'entraînement pour modifier les paramètres.")
+            return
+
+        try:
+            # Récupération et validation
+            self.params.EPISODES = max(1, self.var_episodes.get())
+            self.params.ALPHA = max(0.0, min(1.0, self.var_alpha.get()))
+            self.params.GAMMA = max(0.0, min(1.0, self.var_gamma.get()))
+            self.params.EPSILON_INIT = max(0.0, min(1.0, self.var_epsilon_init.get()))
+            self.params.DECAY_EPSILON = max(0.0, min(1.0, self.var_decay.get()))
+            self.params.MIN_EPSILON = max(0.0, min(1.0, self.var_min_epsilon.get()))
+            
+            # Mise à jour de la barre de progression
+            self.progress_bar['maximum'] = self.params.EPISODES
+            self.label_episode['text'] = f"Episode: 0 / {self.params.EPISODES}"
+            
+            self.training_finished = False # Les nouveaux paramètres impliquent un nouvel entraînement
+            self.button_replay.config(state=tk.DISABLED)
+            
+            self.label_status_params.config(text="Statut: Paramètres appliqués. Prêt pour l'entraînement.", foreground="green")
+            messagebox.showinfo("Succès", "Les paramètres ont été mis à jour.")
+            
+        except tk.TclError:
+            messagebox.showerror("Erreur de Saisie", "Veuillez entrer des nombres valides pour tous les champs.")
+
+    def reset_parameters(self):
+        """Réinitialise les paramètres aux valeurs par défaut."""
+        if self.training_in_progress:
+            messagebox.showwarning("Action impossible", "Veuillez attendre la fin de l'entraînement.")
+            return
+
+        # Créer une nouvelle instance par défaut (ou réinitialiser les valeurs de la classe)
+        default_params = QLearningParameters(self.params.TAILLE_ETAT_BASE, self.params.NB_ACTIONS)
+        self.params.__dict__.update(default_params.__dict__) # Copie des attributs
+        
+        # Mise à jour des variables de l'interface
+        self.var_episodes.set(self.params.EPISODES)
+        self.var_alpha.set(self.params.ALPHA)
+        self.var_gamma.set(self.params.GAMMA)
+        self.var_epsilon_init.set(self.params.EPSILON_INIT)
+        self.var_decay.set(self.params.DECAY_EPSILON)
+        self.var_min_epsilon.set(self.params.MIN_EPSILON)
+        
+        self.apply_parameters() # Appliquer pour mettre à jour la barre de progression
+        self.label_status_params.config(text="Statut: Paramètres réinitialisés et appliqués.", foreground="blue")
+
+    # --- Fin de la section Paramètres ---
+    
     def setup_grid_frame(self, frame):
         self.canvas_grid = tk.Canvas(frame, width=self.canvas_width, height=self.canvas_height, bg="white", borderwidth=0, highlightthickness=0)
         self.canvas_grid.pack(side=tk.LEFT, padx=10, pady=10)
@@ -349,9 +511,9 @@ class QLearningGUI:
         
         # --- Progression ---
         ttk.Label(frame_controls, text="PROGRESSION", font=('Arial', 12, 'bold')).pack(pady=5, anchor="w")
-        self.progress_bar = ttk.Progressbar(frame_controls, orient='horizontal', length=250, mode='determinate', maximum=self.agent.EPISODES)
+        self.progress_bar = ttk.Progressbar(frame_controls, orient='horizontal', length=250, mode='determinate', maximum=self.params.EPISODES)
         self.progress_bar.pack(pady=5, fill='x')
-        self.label_episode = ttk.Label(frame_controls, text=f"Episode: 0 / {self.agent.EPISODES}")
+        self.label_episode = ttk.Label(frame_controls, text=f"Episode: 0 / {self.params.EPISODES}")
         self.label_episode.pack(pady=2, anchor="w")
         self.label_best_reward = ttk.Label(frame_controls, text="Meilleure Récompense: N/A")
         self.label_best_reward.pack(pady=2, anchor="w")
@@ -377,14 +539,12 @@ class QLearningGUI:
     def setup_3d_frame(self, frame):
         """Configure le cadre pour la visualisation 3D Matplotlib."""
         self.fig_3d = plt.figure(figsize=(10, 8))
-        # Projection 3D
         self.ax_3d = self.fig_3d.add_subplot(111, projection='3d')
         
         self.canvas_3d = FigureCanvasTkAgg(self.fig_3d, master=frame)
         self.canvas_3d_widget = self.canvas_3d.get_tk_widget()
         self.canvas_3d_widget.pack(fill=tk.BOTH, expand=True)
         
-        # Initial draw
         self.draw_3d_environment([])
 
     def on_tab_change(self, event):
@@ -394,18 +554,15 @@ class QLearningGUI:
             path_to_draw = getattr(self, 'final_optimal_path', [])
             self.draw_3d_environment(path_to_draw)
             
-    # --- Fonction 3D ---
+    # --- Fonction 3D (inchangée) ---
     def draw_3d_environment(self, path=None):
         """Dessine l'environnement 3D (grille, obstacles, chemin) avec une vue isométrique."""
         if not self.master.winfo_exists(): return
         
         self.ax_3d.clear()
         
-        # --- Configuration de la vue Isométrique ---
-        # Elever 30 degrés, Azimuth -60 degrés (vue de haut-droite classique isométrique)
         self.ax_3d.view_init(elev=30, azim=-60) 
         
-        # Labels et limites
         max_coord = self.agent.TAILLE_GRILLE_XY - 1
         max_alt = self.agent.NIVEAUX_ALTITUDE - 1
         
@@ -414,7 +571,7 @@ class QLearningGUI:
         self.ax_3d.set_ylabel("Ligne (Y)")
         self.ax_3d.set_zlabel("Altitude (Z)")
         
-        self.ax_3d.set_xlim(0, max_coord + 1) # +1 pour que le dernier cube soit visible
+        self.ax_3d.set_xlim(0, max_coord + 1) 
         self.ax_3d.set_ylim(0, max_coord + 1)
         self.ax_3d.set_zlim(0, max_alt + 1)
         
@@ -425,14 +582,10 @@ class QLearningGUI:
         self.ax_3d.set_zticks(np.arange(0.5, self.agent.NIVEAUX_ALTITUDE, 1), 
                               labels=np.arange(0, self.agent.NIVEAUX_ALTITUDE, 1))
 
-        # Inverser l'axe Y (row 0 is top) pour correspondre à la convention de la grille 2D
         self.ax_3d.invert_yaxis() 
         
         # --- 1. Dessin des Obstacles (Blocs) ---
         for r, c, a in self.agent.coords_obstacles:
-            # r (row) -> Y axis, c (col) -> X axis, a (alt) -> Z axis
-            # Dessiner un cube (ou 'voxel') à la position.
-            # (c, r, a) est le point de départ du cube (coin inférieur/avant)
             self.ax_3d.bar3d(c, r, a, 1, 1, 1, 
                              color='black', alpha=0.6, shade=True)
 
@@ -443,13 +596,11 @@ class QLearningGUI:
                               
         # --- 3. Dessin des Points Clés ---
         
-        # Start (Depart) - Utiliser 0.5 pour le centre du cube (voxel)
         if self.agent.coords_depart:
             r_d, c_d, a_d = self.agent.coords_depart
             self.ax_3d.scatter(c_d + 0.5, r_d + 0.5, a_d + 0.5, 
                                color='red', marker='o', s=100, label='Départ (A)', depthshade=False)
                                
-        # Target (Cible)
         if self.agent.coords_cible:
             r_t, c_t, a_t = self.agent.coords_cible
             self.ax_3d.scatter(c_t + 0.5, r_t + 0.5, a_t + 0.5, 
@@ -484,7 +635,7 @@ class QLearningGUI:
         )
         
         if not filepath:
-            return # L'utilisateur a annulé
+            return 
 
         map_data = {
             "taille_xy": self.agent.TAILLE_GRILLE_XY,
@@ -514,18 +665,16 @@ class QLearningGUI:
         )
 
         if not filepath:
-            return # L'utilisateur a annulé
+            return 
 
         try:
             with open(filepath, 'r') as f:
                 map_data = json.load(f)
 
-            # --- Validation du fichier ---
             required_keys = ["taille_xy", "niveaux_altitude", "depart", "cible", "obstacles", "vent"]
             if not all(key in map_data for key in required_keys):
                 raise KeyError("Le fichier JSON ne contient pas les clés requises pour la map.")
 
-            # --- Validation des dimensions ---
             if (map_data["taille_xy"] != self.agent.TAILLE_GRILLE_XY or
                 map_data["niveaux_altitude"] != self.agent.NIVEAUX_ALTITUDE):
                 messagebox.showerror("Erreur d'importation", 
@@ -533,30 +682,25 @@ class QLearningGUI:
                     f"Cette application est configurée pour {self.agent.TAILLE_GRILLE_XY}x{self.agent.TAILLE_GRILLE_XY}x{self.agent.NIVEAUX_ALTITUDE}.")
                 return
 
-            # --- Chargement des données ---
-            # JSON sauvegarde les tuples comme des listes, il faut les reconvertir
             self.agent.coords_depart = tuple(map_data["depart"])
             self.agent.coords_cible = tuple(map_data["cible"])
             self.agent.coords_obstacles = [tuple(obs) for obs in map_data["obstacles"]]
             self.agent.zones_vent = [tuple(vent) for vent in map_data["vent"]]
             
-            # --- Rafraîchir la GUI ---
-            self.current_altitude_level.set(0) # Revenir au sol
+            self.current_altitude_level.set(self.agent.coords_depart[2]) 
             self.draw_grid()
+            self.update_episode_advice() # Mise à jour du conseil après l'importation
             messagebox.showinfo("Importation réussie", "La map a été chargée.")
 
         except json.JSONDecodeError:
             messagebox.showerror("Erreur d'importation", "Le fichier n'est pas un JSON valide.")
         except Exception as e:
             messagebox.showerror("Erreur d'importation", f"Une erreur est survenue:\n{e}")
-    # --- FIN DES NOUVELLES FONCTIONS IMPORT/EXPORT ---
 
     def clear_environment_for_editor(self):
         """Réinitialise l'environnement pour l'éditeur."""
-        self.agent.coords_depart = (self.agent.TAILLE_GRILLE_XY - 1, 0, 0)
-        self.agent.coords_cible = (0, self.agent.TAILLE_GRILLE_XY - 1, self.agent.NIVEAUX_ALTITUDE - 1)
-        self.agent.coords_obstacles = []
-        self.agent.zones_vent = []
+        # Note: Cette fonction n'est plus appelée dans __init__ car l'initialisation a lieu dans agent.__init__
+        pass
 
     def on_grid_click(self, event):
         """Gère les clics de la souris pour éditer la grille."""
@@ -591,17 +735,18 @@ class QLearningGUI:
         elif mode == "cible":
             self.agent.coords_cible = coords_3d
         elif mode == "effacer":
-            # Déjà effacé dans la section 'Suppression préalable'
             pass 
             
         self.draw_grid()
+        self.update_episode_advice() # Mise à jour du conseil si la complexité change
 
     def on_altitude_change(self, val):
         if self.replay_running:
             return 
         
-        if not self.training_finished:
-            self.draw_grid()
+        # En mode entraînement, on montre soit le chemin optimal (si terminé), soit la grille
+        if not self.training_finished or self.training_in_progress:
+            self.draw_grid(self.current_path) # current_path sera le chemin live
         else:
             path_to_draw = getattr(self, 'final_optimal_path', None)
             self.draw_grid(path_to_draw)
@@ -611,6 +756,7 @@ class QLearningGUI:
         cell_size = self.CELL_SIZE
         view_a = self.current_altitude_level.get() 
         
+        # 1. Dessin de la grille de fond (Obstacles, Vent, Cible)
         for r in range(self.agent.TAILLE_GRILLE_XY):
             for c in range(self.agent.TAILLE_GRILLE_XY):
                 x1, y1 = c * cell_size, r * cell_size
@@ -634,10 +780,12 @@ class QLearningGUI:
                 if content:
                      self.canvas_grid.create_text(x1 + cell_size/2, y1 + cell_size/2, text=content, fill="white" if color in ["black", "green"] else "black", font=('Arial', int(cell_size * 0.4), 'bold'))
 
+        # 2. Dessin du Chemin (Replay ou Live)
         if path:
             for i, (r, c, a) in enumerate(path):
                 if i > 0:
                     prev_r, prev_c, prev_a = path[i-1]
+                    # Dessin de la ligne 2D
                     if a == view_a and prev_a == view_a:
                         x_center = c * cell_size + cell_size / 2
                         y_center = r * cell_size + cell_size / 2
@@ -645,6 +793,7 @@ class QLearningGUI:
                         prev_y = prev_r * cell_size + cell_size / 2
                         self.canvas_grid.create_line(prev_x, prev_y, x_center, y_center, fill="blue", width=2)
                 
+                # Dessin du point du chemin
                 if a == view_a:
                     x_center = c * cell_size + cell_size / 2
                     y_center = r * cell_size + cell_size / 2
@@ -654,14 +803,19 @@ class QLearningGUI:
                     
                     self.canvas_grid.create_oval(x_center - 5, y_center - 5, x_center + 5, y_center + 5, fill=color, outline=color)
 
+                    # Indication de mouvement 3D
                     if i > 0 and path[i-1][2] != view_a and (r, c, a) != self.agent.coords_depart:
                         prev_a = path[i-1][2]
                         text = "⬆" if prev_a < a else "⬇"
                         self.canvas_grid.create_text(x_center, y_center, text=text, fill="purple", font=('Arial', 14, 'bold'))
 
+        # 3. Dessin de la position actuelle de l'Agent (point rouge)
         agent_coords = None
         if path and self.replay_running and self.current_step < len(path):
              agent_coords = path[self.current_step] 
+        # En mode Live Training, le dernier point du chemin est l'agent
+        elif self.training_in_progress and path:
+             agent_coords = path[-1] 
         elif self.agent.coords_depart:
              agent_coords = self.agent.coords_depart 
         
@@ -691,7 +845,6 @@ class QLearningGUI:
         if self.current_step < len(self.current_path):
             current_coords = self.current_path[self.current_step]
             
-            # Mise à jour du slider d'altitude et de la vue 2D
             if self.current_altitude_level.get() != current_coords[2]:
                  self.current_altitude_level.set(current_coords[2])
             
@@ -701,33 +854,45 @@ class QLearningGUI:
             self.label_replay_status['text'] = f"Statut: Étape {self.current_step} / {len(self.current_path) - 1} (Alt: {current_coords[2]})"
             
             self.current_step += 1
-            # Replay Vitesse (200 ms par étape)
             self.master.after(200, self.replay_step) 
         else:
             self.replay_running = False
             self.label_replay_status['text'] = "Statut: Replay terminé."
             self.button_replay.config(text="Rejouer Optimal", state=tk.NORMAL)
-            # Redessiner la grille avec la fin du chemin complet
             self.draw_grid(self.final_optimal_path)
 
-
+    def live_path_update(self, path):
+        """Callback appelé par l'agent pour mettre à jour la visualisation en direct (NOUVEAU)."""
+        if not self.master.winfo_exists() or not self.training_in_progress: return
+        
+        self.current_path = path # Garde le chemin de l'épisode en cours
+        
+        # Mise à jour de la grille 2D
+        # Si on est dans l'onglet Éditeur/Replay, on dessine le chemin en direct
+        if self.notebook.tab(self.notebook.select(), "text") == "Éditeur de Grille & Replay (2D)":
+            # Change l'altitude pour suivre l'agent
+            if path and path[-1][2] != self.current_altitude_level.get():
+                self.current_altitude_level.set(path[-1][2])
+            self.draw_grid(self.current_path)
+        
+        # Mise à jour du statut pour montrer l'altitude actuelle de l'agent
+        if path:
+             self.label_replay_status['text'] = f"Statut: Entraînement en cours (Alt: {path[-1][2]})"
+        
     def update_training_status(self, episode, best_reward):
         if not self.master.winfo_exists(): return 
         self.progress_bar['value'] = episode
-        self.label_episode['text'] = f"Episode: {episode} / {self.agent.EPISODES}"
+        self.label_episode['text'] = f"Episode: {episode} / {self.params.EPISODES}"
         if best_reward > -float('inf'):
             self.label_best_reward['text'] = f"Meilleure Récompense: {best_reward:.2f}"
         
-        if episode == 1:
-            self.draw_grid()
-
     def training_complete(self):
         if not self.master.winfo_exists(): return
         
         self.training_in_progress = False
         self.training_finished = True
         
-        messagebox.showinfo("Entrainement Terminé", f"Le Q-learning est terminé après {self.agent.EPISODES} épisodes.\nMeilleure Récompense: {self.agent.meilleure_recompense:.2f}")
+        messagebox.showinfo("Entrainement Terminé", f"Le Q-learning est terminé après {self.params.EPISODES} épisodes.\nMeilleure Récompense: {self.agent.meilleure_recompense:.2f}")
         
         Q_table = self.agent.Q_table
         self.final_optimal_path = obtenir_chemin_optimal(
@@ -740,11 +905,15 @@ class QLearningGUI:
         self.draw_grid(self.final_optimal_path)
         self.plot_convergence()
         self.plot_path_statistics()
-        self.draw_3d_environment(self.final_optimal_path) # Mise à jour de la vue 3D
+        self.draw_3d_environment(self.final_optimal_path)
         
+        self.button_start_train.config(text="Lancer l'entraînement", state=tk.NORMAL)
         self.button_replay.config(state=tk.NORMAL)
         self.altitude_slider.config(state=tk.NORMAL) 
         
+        for child in self.editor_frame.winfo_children():
+             child.config(state=tk.NORMAL)
+             
         self.button_export_map.config(state=tk.NORMAL)
         self.button_import_map.config(state=tk.DISABLED) 
         
@@ -764,8 +933,8 @@ class QLearningGUI:
              messagebox.showwarning("Avertissement", "Le Départ et la Cible sont au même endroit.")
 
         self.training_in_progress = True
+        self.training_finished = False
         
-        # Geler l'interface d'édition ET import/export
         self.button_start_train.config(text="Entraînement en cours...", state=tk.DISABLED)
         self.altitude_slider.config(state=tk.DISABLED)
         for child in self.editor_frame.winfo_children():
@@ -782,8 +951,16 @@ class QLearningGUI:
         def progress_callback(episode, best_reward):
             if self.master.winfo_exists():
                 self.master.after(0, self.update_training_status, episode, best_reward)
+                
+        def live_path_callback(path):
+            if self.master.winfo_exists():
+                self.master.after(0, self.live_path_update, path)
             
-        Q_table, meilleur_chemin, meilleure_recompense, historique_recompenses = self.agent.train(progress_callback)
+        # Lancement de l'entraînement avec le callback de chemin en direct
+        Q_table, meilleur_chemin, meilleure_recompense, historique_recompenses = self.agent.train(
+            progress_callback=progress_callback, 
+            live_path_callback=live_path_callback
+        )
         
         if self.master.winfo_exists():
             self.master.after(0, self.training_complete) 
@@ -828,7 +1005,6 @@ class QLearningGUI:
         if not path:
             return []
             
-        # On calcule les récompenses à partir de l'étape 1 (le départ n'a pas de coût)
         for i in range(1, len(path)): 
             state = path[i]
             prev_state = path[i-1]
@@ -836,22 +1012,14 @@ class QLearningGUI:
             
             if state == agent.coords_cible:
                 r_step = RECOMPENSE_CIBLE
-            elif state in agent.coords_obstacles and prev_state != state: 
-                # Si l'état suivant est un obstacle, il y a eu une collision qui n'est pas gérée ici,
-                # mais la fonction obtenir_chemin_optimal empêche normalement cela.
-                # On ne compte que les mouvements ici.
-                r_step = 0
             else:
-                if state[2] != prev_state[2]: # Changement d'altitude (4 ou 5)
+                if state[2] != prev_state[2]:
                     r_step = RECOMPENSE_MOUVEMENT_3D
-                else: # Mouvement 2D (0, 1, 2, 3)
+                else: 
                     r_step = RECOMPENSE_MOUVEMENT_2D
                 
                 if state in agent.zones_vent:
                     r_step += RECOMPENSE_PENALITE_VENT
-            
-            # Note: Si le chemin s'arrête avant la cible, la récompense est partielle,
-            # mais ici on suit le chemin optimal trouvé.
             
             cum_r += r_step
             rewards.append(cum_r)
@@ -904,7 +1072,6 @@ class QLearningGUI:
         # 3. Cumulative Reward Plot
         rewards = self.get_path_rewards(path, self.agent)
         if rewards:
-            # rewards a len(path) - 1 entrées, pour les étapes 1 à N
             reward_steps = np.arange(1, len(path))
             self.ax_reward.plot(reward_steps, rewards, label="Récompense Cumulée", color='red')
             self.ax_reward.scatter([reward_steps[-1]], [rewards[-1]], color='red', marker='*', s=150)
@@ -917,12 +1084,12 @@ class QLearningGUI:
         self.fig_stats.tight_layout()
         self.canvas_stats.draw()
 
-# --- 5. Lancement de l'Application ---
+# --- 5. Lancement de l'Application (MODIFIÉ) ---
 if __name__ == "__main__":
-    # La configuration de l'agent doit se faire avant de créer la GUI
-    # Cela permet à la GUI d'utiliser les dimensions et les positions initiales
-    agent = QLearningAgent(EPISODES, TAILLE_GRILLE_XY, NIVEAUX_ALTITUDE)
+    
+    params = QLearningParameters(TAILLE_ETAT_BASE, NB_ACTIONS)
+    agent = QLearningAgent(params, TAILLE_GRILLE_XY, NIVEAUX_ALTITUDE)
     
     root = tk.Tk()
-    gui = QLearningGUI(root, agent)
+    gui = QLearningGUI(root, agent, params)
     root.mainloop()
