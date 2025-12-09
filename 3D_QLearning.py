@@ -350,7 +350,7 @@ class QLearningGUI:
         row_alt = ttk.Frame(main_frame); row_alt.pack(fill='x', pady=5)
         ttk.Label(row_alt, text="Altitude Z (1 à 10):", width=20).pack(side=tk.LEFT)
         ttk.Entry(row_alt, textvariable=self.var_altitude, width=10).pack(side=tk.LEFT)
-        ttk.Label(row_alt, text="(Réinitialise la map)", foreground="red", font=("Arial", 8)).pack(side=tk.LEFT, padx=5)
+        ttk.Label(row_alt, text="(Affecte les éléments sur la map)", foreground="red", font=("Arial", 8)).pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=15)
         ttk.Label(main_frame, text="Hyperparamètres de l'Agent", font=('Arial', 12, 'bold')).pack(pady=(0, 10))
@@ -867,6 +867,10 @@ class QLearningGUI:
                         self.agent.TAILLE_GRILLE_XY, self.agent.NIVEAUX_ALTITUDE,
                         mode_stochastique=False
                     )
+                    
+                    if nxt == self.agent.coords_cible:
+                        r -= RECOMPENSE_CIBLE
+                    
                     cum += r
                     rewards.append(cum)
             
