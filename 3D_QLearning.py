@@ -2,6 +2,8 @@ import numpy as np
 import random
 import time
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -385,6 +387,7 @@ class QLearningGUI:
         self.training_in_progress = False
         self.current_altitude_level = tk.IntVar(value=0)
         self.edit_mode = tk.StringVar(value="obstacle")
+        self.view_mode = tk.StringVar(value="terrain") # "terrain" or "heatmap"
         
         self.setup_layout()
         
@@ -470,6 +473,28 @@ class QLearningGUI:
         
         content_sidebar = ttk.Frame(sidebar, style="Sidebar.TFrame", padding=25)
         content_sidebar.pack(fill='both', expand=True)
+        
+        # 0. View Mode Switcher
+        ttk.Label(content_sidebar, text="MODE VISUALISATION", style="SidebarTitle.TLabel").pack(anchor='w', pady=(0, 10))
+        
+        view_frame = tk.Frame(content_sidebar, bg=THEME["bg_sidebar"])
+        view_frame.pack(fill='x', pady=(0, 20))
+        
+        # Custom "Tabs" using Radiobuttons
+        def create_view_btn(txt, val, col_idx):
+            rb = tk.Radiobutton(view_frame, text=txt, variable=self.view_mode, value=val,
+                           indicatoron=0, width=15, height=2,
+                           bg="#37474F", fg="white", selectcolor=THEME["accent"], 
+                           activebackground=THEME["accent"], activeforeground="white",
+                           font=("Segoe UI", 9, "bold"), relief="flat", bd=0, cursor="hand2",
+                           command=lambda: self.draw_grid(self.current_path))
+            rb.grid(row=0, column=col_idx, padx=2, sticky="ew")
+        
+        view_frame.columnconfigure(0, weight=1)
+        view_frame.columnconfigure(1, weight=1)
+        create_view_btn("TACTIQUE", "terrain", 0)
+        create_view_btn("Cerveau IA", "heatmap", 1)
+
 
         # 1. Status Section
         ttk.Label(content_sidebar, text="STATUT MISSION", style="SidebarTitle.TLabel").pack(anchor='w', pady=(0, 10))
@@ -671,36 +696,79 @@ class QLearningGUI:
         self.canvas_grid.delete("all")
         sz = self.CELL_SIZE
         view_a = self.current_altitude_level.get()
+        is_heatmap = (self.view_mode.get() == "heatmap")
         
-        # Fond blanc pur pour "Carte propre"
-        self.canvas_grid.create_rectangle(0,0, self.canvas_width, self.canvas_height, fill="white", outline="white")
+        # --- 1. Rendu Heatmap (Valeurs Q) ---
+        if is_heatmap:
+            # Calculer min/max pour la normalisation de couleur
+            # On prend la Q-Table globale pour que les couleurs soient cohérentes
+            q_min, q_max = np.min(self.agent.Q_table), np.max(self.agent.Q_table)
+            
+            # Éviter division par zero si tout est à 0
+            if q_max == q_min: q_max += 1
 
-        # Grille subtile
+            norm = mcolors.Normalize(vmin=q_min, vmax=q_max)
+            cmap = cm.get_cmap('RdYlGn') # Rouge -> Jaune -> Vert
+
+            for r in range(self.agent.TAILLE_GRILLE_XY):
+                for c in range(self.agent.TAILLE_GRILLE_XY):
+                    idx = coords_to_idx((r, c, view_a), self.agent.TAILLE_GRILLE_XY)
+                    # Valeur maximale de l'état (le meilleur coup possible)
+                    val = np.max(self.agent.Q_table[idx])
+                    
+                    color_rgba = cmap(norm(val))
+                    color_hex = mcolors.to_hex(color_rgba)
+                    
+                    x, y = c*sz, r*sz
+                    self.canvas_grid.create_rectangle(x, y, x+sz, y+sz, fill=color_hex, outline="")
+                    
+                    # Debug text (optionnel, peut surcharger)
+                    # self.canvas_grid.create_text(x+sz/2, y+sz/2, text=f"{int(val)}", font=('Arial', 8))
+
+        else:
+            # --- 1. Rendu Terrain (Classique) ---
+            # Fond blanc pur pour "Carte propre"
+            self.canvas_grid.create_rectangle(0,0, self.canvas_width, self.canvas_height, fill="white", outline="white")
+
+        # --- 2. Grille ---
         for i in range(self.agent.TAILLE_GRILLE_XY + 1):
-            self.canvas_grid.create_line(0, i*sz, self.canvas_width, i*sz, fill=COLORS["grid"], width=1)
-            self.canvas_grid.create_line(i*sz, 0, i*sz, self.canvas_height, fill=COLORS["grid"], width=1)
+            line_col = "#555555" if is_heatmap else COLORS["grid"] # Grille plus sombre en heatmap
+            self.canvas_grid.create_line(0, i*sz, self.canvas_width, i*sz, fill=line_col, width=1)
+            self.canvas_grid.create_line(i*sz, 0, i*sz, self.canvas_height, fill=line_col, width=1)
 
-        def draw_cell(r, c, color, text="", text_color="white"):
+        def draw_cell_icon(r, c, color, text="", text_color="white", fill_bg=True):
             x, y = c*sz, r*sz
-            # Design Flat : Pas de bordure, couleur pleine
-            self.canvas_grid.create_rectangle(x+1, y+1, x+sz-1, y+sz-1, fill=color, outline="")
+            # En mode heatmap, on ne remplit pas le fond sauf pour les obstacles majeurs
+            if fill_bg and (not is_heatmap or color == COLORS["obstacle"]):
+                self.canvas_grid.create_rectangle(x+1, y+1, x+sz-1, y+sz-1, fill=color, outline="")
+            
             if text:
                 font_size = 18 if sz >= 50 else 10
-                self.canvas_grid.create_text(x+sz/2, y+sz/2, text=text, fill=text_color, font=('Segoe UI Emoji', font_size))
+                # En heatmap, texte noir pour contraste
+                tc = "black" if is_heatmap and color != COLORS["obstacle"] else text_color
+                self.canvas_grid.create_text(x+sz/2, y+sz/2, text=text, fill=tc, font=('Segoe UI Emoji', font_size))
 
         # Dessin des entités
         for r in range(self.agent.TAILLE_GRILLE_XY):
             for c in range(self.agent.TAILLE_GRILLE_XY):
                 coord = (r, c, view_a)
                 
-                if coord in self.agent.coords_obstacles: draw_cell(r, c, COLORS["obstacle"])
-                elif coord in self.agent.zones_vent: draw_cell(r, c, COLORS["vent"], "〰")
-                elif coord in self.agent.zones_thermiques: draw_cell(r, c, COLORS["thermique"], "🔥")
-                elif coord in self.agent.zones_descendantes: draw_cell(r, c, COLORS["descendant"], "❄️")
-                elif coord in self.agent.zones_inertie: draw_cell(r, c, COLORS["inertie"], "⚡")
+                # En Heatmap, on n'affiche que les murs et cibles/départs pour ne pas surcharger
+                # En Terrain, on affiche tout
                 
-                if coord == self.agent.coords_depart: draw_cell(r, c, COLORS["depart"], "🛫")
-                if coord == self.agent.coords_cible: draw_cell(r, c, COLORS["cible"], "🎯")
+                if coord in self.agent.coords_obstacles: draw_cell_icon(r, c, COLORS["obstacle"])
+                
+                elif coord in self.agent.zones_vent: 
+                     draw_cell_icon(r, c, COLORS["vent"], "〰", fill_bg=not is_heatmap)
+                elif coord in self.agent.zones_thermiques: 
+                     draw_cell_icon(r, c, COLORS["thermique"], "🔥", fill_bg=not is_heatmap)
+                elif coord in self.agent.zones_descendantes: 
+                     draw_cell_icon(r, c, COLORS["descendant"], "❄️", fill_bg=not is_heatmap)
+                elif coord in self.agent.zones_inertie: 
+                     draw_cell_icon(r, c, COLORS["inertie"], "⚡", fill_bg=not is_heatmap)
+                
+                if coord == self.agent.coords_depart: draw_cell_icon(r, c, COLORS["depart"], "🛫")
+                if coord == self.agent.coords_cible: draw_cell_icon(r, c, COLORS["cible"], "🎯")
 
         # Trajectoire (Ligne lisse avec marqueurs)
         if path:
@@ -708,21 +776,25 @@ class QLearningGUI:
             for i, (r, c, a) in enumerate(path):
                 if a == view_a:
                     cx, cy = c*sz+sz/2, r*sz+sz/2
-                    col = THEME["accent"] if i==len(path)-1 else THEME["primary"]
+                    # En heatmap, on met la trajectoire en Blanc ou Noir pour contraste
+                    col_line = "white" if is_heatmap else THEME["primary"]
+                    col_dot = "white" if is_heatmap else THEME["accent"]
                     
+                    if i==len(path)-1: col_dot = "#FFD600" # Target reach color
+
                     # Drone marker
-                    self.canvas_grid.create_oval(cx-6, cy-6, cx+6, cy+6, fill=col, outline="white", width=2)
+                    self.canvas_grid.create_oval(cx-6, cy-6, cx+6, cy+6, fill=col_dot, outline="black", width=1)
                     
                     # Ligne de connexion
                     if i > 0:
                         pr, pc, pa = path[i-1]
                         if pa == a:
                             px, py = pc*sz+sz/2, pr*sz+sz/2
-                            self.canvas_grid.create_line(px, py, cx, cy, fill=THEME["primary"], width=3, capstyle=tk.ROUND, smooth=True)
+                            self.canvas_grid.create_line(px, py, cx, cy, fill=col_line, width=3, capstyle=tk.ROUND, smooth=True)
                         else:
                             # Indicateur de transition Z
                             txt = "▲" if pa < a else "▼"
-                            color_trans = "#AA00FF"
+                            color_trans = "black" if is_heatmap else "#AA00FF"
                             offset_y = -18 if pa < a else 18
                             self.canvas_grid.create_text(cx+18, cy+offset_y, text=txt, fill=color_trans, font=('Arial', 14, 'bold'))
 
