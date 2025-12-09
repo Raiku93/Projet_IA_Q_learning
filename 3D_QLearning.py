@@ -62,8 +62,8 @@ class QLearningParameters:
         """Calcule un nombre d'épisodes conseillé selon la complexité."""
         nombre_etats_libres = self.TAILLE_ETAT_BASE - len(coords_obstacles)
         facteur_complexite = 1.5 
-        conseil = int(nombre_etats_libres * 200 * facteur_complexite)
-        return max(3000, min(30000, conseil))
+        conseil = int(nombre_etats_libres * 20 * facteur_complexite)
+        return max(10000, min(30000, conseil))
 
 # --- 3. Fonctions Logiques de l'Environnement ---
 
@@ -332,32 +332,90 @@ class QLearningGUI:
 
     # --- Onglet Paramètres ---
     def setup_params_frame(self, frame):
+        # Variables existantes
         self.var_episodes = tk.IntVar(value=self.params.EPISODES)
         self.var_alpha = tk.DoubleVar(value=self.params.ALPHA)
         self.var_gamma = tk.DoubleVar(value=self.params.GAMMA)
         self.var_epsilon_init = tk.DoubleVar(value=self.params.EPSILON_INIT)
         
+        # NOUVELLE VARIABLE : Altitude
+        self.var_altitude = tk.IntVar(value=self.agent.NIVEAUX_ALTITUDE)
+        
         main_frame = ttk.Frame(frame, padding="15")
         main_frame.pack(fill='both', expand=True)
-        ttk.Label(main_frame, text="Paramètres de l'IA", font=('Arial', 14)).pack(pady=10)
         
+        ttk.Label(main_frame, text="Paramètres Environnement", font=('Arial', 12, 'bold')).pack(pady=(0, 10))
+        
+        # Champ Altitude
+        row_alt = ttk.Frame(main_frame); row_alt.pack(fill='x', pady=5)
+        ttk.Label(row_alt, text="Altitude Z (1 à 10):", width=20).pack(side=tk.LEFT)
+        ttk.Entry(row_alt, textvariable=self.var_altitude, width=10).pack(side=tk.LEFT)
+        ttk.Label(row_alt, text="(Réinitialise la map)", foreground="red", font=("Arial", 8)).pack(side=tk.LEFT, padx=5)
+
+        ttk.Separator(main_frame, orient='horizontal').pack(fill='x', pady=15)
+        ttk.Label(main_frame, text="Hyperparamètres de l'Agent", font=('Arial', 12, 'bold')).pack(pady=(0, 10))
+        
+        # Champs IA existants
         for txt, var in [("Episodes:", self.var_episodes), ("Alpha:", self.var_alpha), ("Gamma:", self.var_gamma), ("Epsilon Init:", self.var_epsilon_init)]:
             row = ttk.Frame(main_frame); row.pack(fill='x', pady=5)
             ttk.Label(row, text=txt, width=20).pack(side=tk.LEFT)
             ttk.Entry(row, textvariable=var, width=10).pack(side=tk.LEFT)
             
-        ttk.Button(main_frame, text="Appliquer", command=self.apply_params).pack(pady=10)
+        ttk.Button(main_frame, text="Appliquer Tout", command=self.apply_params).pack(pady=20)
         self.lbl_advice = ttk.Label(main_frame, text="", foreground="blue"); self.lbl_advice.pack()
         self.update_advice()
 
     def apply_params(self):
-        if self.training_in_progress: return
+        if self.training_in_progress: 
+            messagebox.showwarning("Stop", "Impossible de modifier les paramètres pendant l'entraînement.")
+            return
+
+        # 1. Mise à jour des Hyperparamètres IA
         self.params.EPISODES = self.var_episodes.get()
         self.params.ALPHA = self.var_alpha.get()
         self.params.GAMMA = self.var_gamma.get()
         self.params.EPSILON_INIT = self.var_epsilon_init.get()
         self.progress_bar['maximum'] = self.params.EPISODES
-        messagebox.showinfo("OK", "Paramètres mis à jour")
+
+        # 2. Gestion du changement d'Altitude
+        new_alt = self.var_altitude.get()
+        if new_alt < 1: new_alt = 1 # Sécurité
+        if new_alt > 10: new_alt = 10 # Sécurité
+        
+        if new_alt != self.agent.NIVEAUX_ALTITUDE:
+            # Mise à jour de l'agent
+            self.agent.NIVEAUX_ALTITUDE = new_alt
+            self.agent.TAILLE_ETAT = self.agent.TAILLE_GRILLE_XY * self.agent.TAILLE_GRILLE_XY * new_alt
+            self.params.TAILLE_ETAT_BASE = self.agent.TAILLE_ETAT # Mise à jour param size
+            
+            # Reset complet de la mémoire de l'agent
+            self.agent.reset_for_training()
+            
+            # Nettoyage de la map : on supprime les blocs qui sont désormais "hors limites" (trop haut)
+            features = [self.agent.coords_obstacles, self.agent.zones_vent, self.agent.zones_thermiques, 
+                        self.agent.zones_descendantes, self.agent.zones_inertie]
+            for feature_list in features:
+                # On garde seulement les éléments dont z < new_alt
+                feature_list[:] = [coord for coord in feature_list if coord[2] < new_alt]
+            
+            # Reset Départ/Cible si hors limites
+            if self.agent.coords_depart and self.agent.coords_depart[2] >= new_alt:
+                self.agent.coords_depart = (self.agent.TAILLE_GRILLE_XY-1, 0, 0) # Reset sol
+            if self.agent.coords_cible and self.agent.coords_cible[2] >= new_alt:
+                self.agent.coords_cible = (0, self.agent.TAILLE_GRILLE_XY-1, new_alt-1) # Reset plafond
+            
+            # Mise à jour de l'UI
+            self.current_altitude_level.set(0)
+            self.scale_altitude.config(to=new_alt-1) # Mise à jour du slider
+            self.draw_grid()
+            self.draw_3d_environment()
+            
+            messagebox.showinfo("Mise à jour", f"Paramètres appliqués.\nL'environnement a été redimensionné à {new_alt} niveaux.")
+        else:
+            messagebox.showinfo("Succès", "Paramètres IA mis à jour.")
+            
+        self.update_advice()
+
 
     def update_advice(self):
         c = self.params.calculer_episodes_conseilles(self.agent.coords_obstacles)
@@ -379,14 +437,17 @@ class QLearningGUI:
         self.canvas_grid = tk.Canvas(frame, width=self.canvas_width, height=self.canvas_height, bg="white")
         self.canvas_grid.pack(side=tk.LEFT, padx=10, pady=10)
 
-        # Panneau de contrôle Droit
         ctrl = ttk.Frame(frame); ctrl.pack(side=tk.RIGHT, padx=10, pady=10, fill="y")
         
-        # 1. Slider Altitude
+        # 1. Slider Altitude (MODIFIÉ)
         lf_visu = ttk.LabelFrame(ctrl, text="Altitude de vue (Couche)", padding=5)
         lf_visu.pack(fill='x', pady=5)
-        tk.Scale(lf_visu, from_=0, to=self.agent.NIVEAUX_ALTITUDE-1, orient=tk.HORIZONTAL, 
-                 variable=self.current_altitude_level, command=self.on_altitude_change).pack(fill='x')
+        
+        # On stocke le widget dans self.scale_altitude pour pouvoir le mettre à jour
+        self.scale_altitude = tk.Scale(lf_visu, from_=0, to=self.agent.NIVEAUX_ALTITUDE-1, orient=tk.HORIZONTAL, 
+                 variable=self.current_altitude_level, command=self.on_altitude_change)
+        self.scale_altitude.pack(fill='x')
+
 
         # 2. Palette d'Outils avec Légende Couleur
         lf_tools = ttk.LabelFrame(ctrl, text="Palette d'Outils", padding=5)
@@ -804,27 +865,16 @@ class QLearningGUI:
 
 # --- POINT D'ENTRÉE MAIN ---
 if __name__ == "__main__":
-    # 1. Fenêtre de dialogue pour la configuration au lancement
-    root_dialog = tk.Tk()
-    root_dialog.withdraw() # Cache la fenêtre principale temporairement
+    # On définit l'altitude par défaut ici (ex: 3)
+    # L'utilisateur pourra la changer ensuite dans l'onglet "Paramètres"
+    DEFAULT_ALTITUDE = 3
     
-    nb_niveaux = simpledialog.askinteger(
-        "Configuration Drone 3D", 
-        "Nombre de niveaux d'altitude souhaités (1-5) :\n(Défaut: 3)", 
-        minvalue=1, maxvalue=5, initialvalue=3
-    )
-    
-    root_dialog.destroy()
-    
-    # Si l'utilisateur annule, on quitte
-    if nb_niveaux is None:
-        exit()
-        
-    # 2. Initialisation de l'application
-    params = QLearningParameters(TAILLE_GRILLE_XY * TAILLE_GRILLE_XY * nb_niveaux, NB_ACTIONS)
-    agent = QLearningAgent(params, TAILLE_GRILLE_XY, nb_niveaux)
+    # Initialisation de l'application
+    params = QLearningParameters(TAILLE_GRILLE_XY * TAILLE_GRILLE_XY * DEFAULT_ALTITUDE, NB_ACTIONS)
+    agent = QLearningAgent(params, TAILLE_GRILLE_XY, DEFAULT_ALTITUDE)
     
     root = tk.Tk()
+    
     # Configuration du style pour que ce soit un peu plus moderne
     style = ttk.Style()
     style.theme_use('clam')
