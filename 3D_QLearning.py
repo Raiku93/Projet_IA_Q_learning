@@ -10,7 +10,7 @@ import json
 from mpl_toolkits.mplot3d import Axes3D
 
 # --- 1. CONFIGURATION & ESTHÉTIQUE ---
-TAILLE_GRILLE_XY = 10
+TAILLE_GRILLE_XY = 10 # Valeur par défaut, modifiable via l'UI
 
 # Palette de couleurs "Aero Science"
 THEME = {
@@ -559,7 +559,10 @@ class QLearningGUI:
         self.var_alpha = tk.DoubleVar(value=self.params.ALPHA)
         self.var_gamma = tk.DoubleVar(value=self.params.GAMMA)
         self.var_epsilon = tk.DoubleVar(value=self.params.EPSILON_INIT)
+        
+        # Dimensions Map
         self.var_altitude_max = tk.IntVar(value=self.agent.NIVEAUX_ALTITUDE)
+        self.var_taille_xy = tk.IntVar(value=self.agent.TAILLE_GRILLE_XY)
 
         create_param_row(grid_f, 0, "Itérations (Épisodes) :", self.var_episodes, "Nombre total de cycles d'entraînement pour la convergence.", True)
         create_param_row(grid_f, 1, "Taux d'Apprentissage (α) :", self.var_alpha, "Poids donné aux nouvelles informations vs connaissances acquises.")
@@ -568,7 +571,8 @@ class QLearningGUI:
         
         ttk.Separator(grid_f, orient='horizontal').grid(row=4, column=0, columnspan=3, sticky='ew', pady=20)
         
-        create_param_row(grid_f, 5, "Plafond de Vol (Couches Z) :", self.var_altitude_max, "Hauteur maximale de l'espace aérien discrétisé.", True)
+        create_param_row(grid_f, 5, "Dimensions Grille (X/Y) :", self.var_taille_xy, "Taille latérale de la zone de vol (Carré). Min: 5, Max: 20.", True)
+        create_param_row(grid_f, 6, "Plafond de Vol (Couches Z) :", self.var_altitude_max, "Hauteur maximale de l'espace aérien discrétisé. Min: 1, Max: 10.", True)
 
         btn_apply = ttk.Button(container, text="Appliquer Configuration", style="Action.TButton", command=self.apply_params)
         btn_apply.pack(pady=30)
@@ -632,7 +636,9 @@ class QLearningGUI:
             x, y = c*sz, r*sz
             self.canvas_grid.create_rectangle(x+1, y+1, x+sz-1, y+sz-1, fill=color, outline=color)
             if text:
-                self.canvas_grid.create_text(x+sz/2, y+sz/2, text=text, fill=text_color, font=('Segoe UI', 16, 'bold'))
+                # Adaptation taille police si la case est petite
+                font_size = 16 if sz >= 50 else 10
+                self.canvas_grid.create_text(x+sz/2, y+sz/2, text=text, fill=text_color, font=('Segoe UI', font_size, 'bold'))
 
         for r in range(self.agent.TAILLE_GRILLE_XY):
             for c in range(self.agent.TAILLE_GRILLE_XY):
@@ -825,26 +831,54 @@ class QLearningGUI:
         self.params.GAMMA = self.var_gamma.get()
         self.params.EPSILON_INIT = self.var_epsilon.get()
 
+        # Nouvelle logique de redimensionnement
+        new_xy = self.var_taille_xy.get()
+        new_xy = max(5, min(20, new_xy)) # Sécurité pour l'UI
+
         new_alt = self.var_altitude_max.get()
         new_alt = max(1, min(10, new_alt)) 
         
-        if new_alt != self.agent.NIVEAUX_ALTITUDE:
+        if new_xy != self.agent.TAILLE_GRILLE_XY or new_alt != self.agent.NIVEAUX_ALTITUDE:
+            # Update Agent
+            self.agent.TAILLE_GRILLE_XY = new_xy
             self.agent.NIVEAUX_ALTITUDE = new_alt
-            self.agent.TAILLE_ETAT = self.agent.TAILLE_GRILLE_XY * self.agent.TAILLE_GRILLE_XY * new_alt
+            self.agent.TAILLE_ETAT = new_xy * new_xy * new_alt
             self.agent.reset_for_training()
             
+            # Nettoyage des objets hors limites (XY et Z)
             features = [self.agent.coords_obstacles, self.agent.zones_vent, self.agent.zones_thermiques, 
                         self.agent.zones_descendantes, self.agent.zones_inertie]
             for feature_list in features:
-                feature_list[:] = [coord for coord in feature_list if coord[2] < new_alt]
+                feature_list[:] = [c for c in feature_list if c[0] < new_xy and c[1] < new_xy and c[2] < new_alt]
             
-            if self.agent.coords_depart and self.agent.coords_depart[2] >= new_alt: self.agent.coords_depart = (9, 0, 0)
-            if self.agent.coords_cible and self.agent.coords_cible[2] >= new_alt: self.agent.coords_cible = (0, 9, new_alt-1)
+            # Reset Start/Target si hors limites
+            if self.agent.coords_depart:
+                r, c, a = self.agent.coords_depart
+                if r >= new_xy or c >= new_xy or a >= new_alt:
+                    self.agent.coords_depart = (new_xy-1, 0, 0)
             
+            if self.agent.coords_cible:
+                r, c, a = self.agent.coords_cible
+                if r >= new_xy or c >= new_xy or a >= new_alt:
+                    self.agent.coords_cible = (0, new_xy-1, new_alt-1)
+            
+            # Mise à jour de l'UI Canvas
+            # Adaptation de la taille des cellules pour que ça rentre dans l'écran
+            if new_xy > 15:
+                self.CELL_SIZE = 40
+            else:
+                self.CELL_SIZE = 55
+                
+            self.canvas_width = self.CELL_SIZE * new_xy
+            self.canvas_height = self.CELL_SIZE * new_xy
+            self.canvas_grid.config(width=self.canvas_width, height=self.canvas_height)
+            
+            # Reset Sliders
             self.current_altitude_level.set(0)
             self.scale_alt.config(to=new_alt-1)
+            
             self.draw_grid()
-            messagebox.showinfo("Système", f"Configuration spatiale mise à jour : {new_alt} couches.")
+            messagebox.showinfo("Système", f"Géométrie redéfinie : {new_xy}x{new_xy} sur {new_alt} couches.")
         
         self.update_advice()
         messagebox.showinfo("Système", "Paramètres enregistrés.")
