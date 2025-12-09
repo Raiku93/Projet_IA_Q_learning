@@ -680,8 +680,7 @@ class QLearningGUI:
         self.training_in_progress = False
         self.btn_train.config(state=tk.NORMAL)
         self.btn_replay.config(state=tk.NORMAL)
-        self.lbl_status['text'] = "Entraînement Terminé."
-        
+        self.lbl_status['text'] = "Entraînement Terminé. Meilleure Récompense :", RECOMPENSE_CIBLE
         # Calcul du chemin final sans aléatoire
         self.final_optimal_path = obtenir_chemin_optimal(
             self.agent.Q_table, self.agent.coords_depart, self.agent.coords_cible,
