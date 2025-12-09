@@ -470,11 +470,11 @@ class QLearningGUI:
         add_tool(lf_tools, "Cible (T)", "cible", COLORS["cible"])
         add_tool(lf_tools, "Obstacle", "obstacle", COLORS["obstacle"])
         
-        ttk.Label(lf_tools, text="Physique:", font=("Arial", 9, "bold")).pack(anchor='w', pady=(5,0))
-        add_tool(lf_tools, "Thermique (Monte)", "thermique", COLORS["thermique"])
-        add_tool(lf_tools, "Descendant (Desc.)", "descendant", COLORS["descendant"])
-        add_tool(lf_tools, "Vent (Pénalité)", "vent", COLORS["vent"])
-        add_tool(lf_tools, "Inertie (Glisse)", "inertie", COLORS["inertie"])
+        ttk.Label(lf_tools, text="Courant:", font=("Arial", 9, "bold")).pack(anchor='w', pady=(5,0))
+        add_tool(lf_tools, "Ascendant", "thermique", COLORS["thermique"])
+        add_tool(lf_tools, "Descendant", "descendant", COLORS["descendant"])
+        add_tool(lf_tools, "Turbulence", "vent", COLORS["vent"])
+        add_tool(lf_tools, "Glissant", "inertie", COLORS["inertie"])
         
         ttk.Separator(lf_tools, orient='horizontal').pack(fill='x', pady=5)
         ttk.Radiobutton(lf_tools, text="Gomme / Effacer", variable=self.edit_mode, value="effacer").pack(anchor='w')
